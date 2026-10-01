@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 
-import { assert, isNodeJS } from "../../src/shared/util.js";
+import { assert, isNodeJS, stringToBytes } from "../../src/shared/util.js";
 import { Dict, Name, Ref } from "../../src/core/primitives.js";
 import {
   fetchData as fetchDataNode,
@@ -74,6 +74,26 @@ function buildGetDocumentParams(filename, options) {
     params[option] = options[option];
   }
   return params;
+}
+
+// Builds a PDF file from its objects, with a valid xref table.
+function assemblePdf(objects, trailerEntries = "") {
+  let pdf = "%PDF-1.7\n";
+  const offsets = [];
+  for (const obj of objects) {
+    offsets.push(pdf.length);
+    pdf += obj;
+  }
+  const xrefOffset = pdf.length;
+  pdf += `xref\n0 ${objects.length + 1}\n`;
+  pdf += "0000000000 65535 f \n";
+  for (const offset of offsets) {
+    pdf += `${offset.toString().padStart(10, "0")} 00000 n \n`;
+  }
+  pdf +=
+    `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R ${trailerEntries}>>\n` +
+    `startxref\n${xrefOffset}\n%%EOF\n`;
+  return stringToBytes(pdf);
 }
 
 // Builds a PDF sound object's stream dictionary (ISO 32000-1, 12.5.6.16). Pass
@@ -311,6 +331,7 @@ class TestPdfsServer {
 }
 
 export {
+  assemblePdf,
   BoundedXRefMock,
   buildGetDocumentParams,
   CMAP_URL,

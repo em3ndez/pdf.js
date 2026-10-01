@@ -33,6 +33,7 @@ import {
   UnknownErrorException,
 } from "../../src/shared/util.js";
 import {
+  assemblePdf,
   buildGetDocumentParams,
   CMAP_URL,
   DefaultBinaryDataFactory,
@@ -110,25 +111,6 @@ describe("api", function () {
       }
     }
     return count;
-  }
-
-  function assemblePdf(objects, trailerEntries = "") {
-    let pdf = "%PDF-1.7\n";
-    const offsets = [];
-    for (const obj of objects) {
-      offsets.push(pdf.length);
-      pdf += obj;
-    }
-    const xrefOffset = pdf.length;
-    pdf += `xref\n0 ${objects.length + 1}\n`;
-    pdf += "0000000000 65535 f \n";
-    for (const offset of offsets) {
-      pdf += `${offset.toString().padStart(10, "0")} 00000 n \n`;
-    }
-    pdf +=
-      `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R ${trailerEntries}>>\n` +
-      `startxref\n${xrefOffset}\n%%EOF\n`;
-    return stringToBytes(pdf);
   }
 
   function buildSharedImageResourcePdf() {
