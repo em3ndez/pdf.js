@@ -2535,6 +2535,16 @@ class PartialEvaluator {
     let textState, currentTextState;
     let lastFakeSpaceExtraCharId = -1;
 
+    // For a reflected transform with d > 0, move the origin along the baseline
+    // by the item width, then reverse the baseline direction.
+    function getUnmirroredTransform([a, b, c, d, e, f], width) {
+      if (a * d - b * c >= 0 || d <= 0) {
+        return null;
+      }
+      const scale = width / Math.hypot(a, b);
+      return [-a, -b, c, d, e + a * scale, f + b * scale];
+    }
+
     function pushWhitespace({
       width = 0,
       height = 0,
@@ -2542,6 +2552,9 @@ class PartialEvaluator {
       fontName = textContentItem.fontName,
     }) {
       intersector?.addExtraChar(" ");
+      if (width) {
+        transform = getUnmirroredTransform(transform, width) || transform;
+      }
       textContent.items.push({
         str: " ",
         dir: "ltr",
@@ -2679,13 +2692,21 @@ class PartialEvaluator {
     }
 
     function runBidiTransform(textChunk) {
-      const bidiResult = bidi(textChunk.str, -1, textChunk.vertical);
+      let { str, transform } = textChunk;
+      const width = Math.abs(textChunk.totalWidth);
+      const unmirrored =
+        !textChunk.vertical && getUnmirroredTransform(transform, width);
+      if (unmirrored) {
+        str = str.toReversed();
+        transform = unmirrored;
+      }
+      const bidiResult = bidi(str, -1, textChunk.vertical);
       return {
         str: bidiResult.str,
         dir: bidiResult.dir,
-        width: Math.abs(textChunk.totalWidth),
+        width,
         height: Math.abs(textChunk.totalHeight),
-        transform: textChunk.transform,
+        transform,
         fontName: textChunk.fontName,
         hasEOL: textChunk.hasEOL,
       };
@@ -3106,13 +3127,14 @@ class PartialEvaluator {
       for (let i = 0, ii = glyphs.length; i < ii; i++) {
         const glyph = glyphs[i];
         const { category } = glyph;
+        const glyphWidth = font.vertical ? glyph.vmetric[0] : glyph.width;
+        const { isInvisibleFormatMark } = category;
 
-        if (category.isInvisibleFormatMark) {
+        if (isInvisibleFormatMark && !glyphWidth) {
           continue;
         }
         let charSpacing = baseCharSpacing + (i + 1 === ii ? extraSpacing : 0);
 
-        const glyphWidth = font.vertical ? glyph.vmetric[0] : glyph.width;
         let scaledDim = glyphWidth * scale;
 
         if (glyph.isSpace) {
@@ -3159,13 +3181,14 @@ class PartialEvaluator {
           scaledDim = 0;
         }
 
+        const glyphUnicode = isInvisibleFormatMark ? "" : glyph.unicode;
         if (!font.vertical) {
           scaledDim *= textState.textHScale;
           intersector?.addGlyph(
             getCurrentTextTransform(),
             scaledDim,
             0,
-            glyph.unicode
+            glyphUnicode
           );
           textState.translateTextMatrix(scaledDim, 0);
           textChunk.width += scaledDim;
@@ -3174,7 +3197,7 @@ class PartialEvaluator {
             getCurrentTextTransform(),
             0,
             scaledDim,
-            glyph.unicode
+            glyphUnicode
           );
           textState.translateTextMatrix(0, scaledDim);
           scaledDim = Math.abs(scaledDim);
@@ -3182,27 +3205,25 @@ class PartialEvaluator {
         }
 
         if (scaledDim) {
-          // Save the position of the last visible character.
+          // Save the position after advancing by this glyph's width.
           textChunk.prevTransform = getCurrentTextTransform();
           textChunk.prevGlyphWidth = scaledDim;
           textChunk.prevTextRise = textState.textRise;
         }
 
-        const glyphUnicode = glyph.unicode;
-        if (saveLastChar(glyphUnicode)) {
-          // The two last chars are a non-whitespace followed by a whitespace
-          // and then this non-whitespace, so we insert a whitespace here.
-          // Replaces all whitespaces with standard spaces (0x20), to avoid
-          // alignment issues between the textLayer and the canvas if the text
-          // contains e.g. tabs (fixes issue6612.pdf).
-          textChunk.str.push(" ");
-          intersector?.addExtraChar(" ");
-        }
+        if (!isInvisibleFormatMark) {
+          if (saveLastChar(glyphUnicode)) {
+            // Insert a standard space (U+0020) between non-whitespace glyphs
+            // when the preceding whitespace was skipped above.
+            textChunk.str.push(" ");
+            intersector?.addExtraChar(" ");
+          }
 
-        if (!intersector) {
-          textChunk.str.push(
-            disableNormalization ? glyphUnicode : glyph.normalizedUnicode
-          );
+          if (!intersector) {
+            textChunk.str.push(
+              disableNormalization ? glyphUnicode : glyph.normalizedUnicode
+            );
+          }
         }
 
         if (charSpacing) {
