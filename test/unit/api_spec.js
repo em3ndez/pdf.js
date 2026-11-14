@@ -5878,6 +5878,26 @@ have written that much by now. So, here’s to squashing bugs.`);
       await loadingTask.destroy();
     });
 
+    it("gets text content with mirrored RTL text (issue 16754)", async function () {
+      const loadingTask = getDocument(buildGetDocumentParams("issue16754.pdf"));
+      const pdfDoc = await loadingTask.promise;
+      const pdfPage = await pdfDoc.getPage(1);
+      const { items } = await pdfPage.getTextContent();
+      // The same Hebrew character sequence uses normal and mirrored text
+      // matrices; the mirrored run ends with an LRM (U+200E).
+      expect(items.map(({ str, dir }) => ({ str, dir }))).toEqual([
+        { str: "רחאב", dir: "rtl" },
+        { str: "באחר", dir: "rtl" },
+      ]);
+      const { transform, width } = items[1];
+      [20, 0, 0, 20, 145.52, 100].forEach((value, i) => {
+        expect(transform[i]).toBeCloseTo(value, 2);
+      });
+      expect(width).toBeCloseTo(54.48, 2);
+
+      await loadingTask.destroy();
+    });
+
     it("gets empty structure tree", async function () {
       const tree = await page.getStructTree();
 
