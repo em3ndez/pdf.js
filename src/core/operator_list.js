@@ -14,11 +14,12 @@
  */
 
 import {
-  assert,
+  DrawOPS,
+  F32_BBOX_INIT,
   ImageKind,
   OPS,
   RenderingIntentFlag,
-  shadow,
+  Util,
   warn,
 } from "../shared/util.js";
 
@@ -26,38 +27,13 @@ function addState(parentState, pattern, checkFn, iterateFn, processFn) {
   let state = parentState;
   for (let i = 0, ii = pattern.length - 1; i < ii; i++) {
     const item = pattern[i];
-    state = state[item] || (state[item] = []);
+    state = state[item] ||= [];
   }
-  state[pattern[pattern.length - 1]] = {
+  state[pattern.at(-1)] = {
     checkFn,
     iterateFn,
     processFn,
   };
-}
-
-function handlePaintSolidColorImageMask(iFirstSave, count, fnArray, argsArray) {
-  // Handles special case of mainly LaTeX documents which use image masks to
-  // draw lines with the current fill style.
-  // 'count' groups of (save, transform, paintImageMaskXObject, restore)+
-  // have been found at iFirstSave.
-  const iFirstPIMXO = iFirstSave + 2;
-  let i;
-  for (i = 0; i < count; i++) {
-    const arg = argsArray[iFirstPIMXO + 4 * i];
-    const imageMask = arg.length === 1 && arg[0];
-    if (
-      imageMask &&
-      imageMask.width === 1 &&
-      imageMask.height === 1 &&
-      (!imageMask.data.length ||
-        (imageMask.data.length === 1 && imageMask.data[0] === 0))
-    ) {
-      fnArray[iFirstPIMXO + 4 * i] = OPS.paintSolidColorImageMask;
-      continue;
-    }
-    break;
-  }
-  return count - i;
 }
 
 const InitialState = [];
@@ -134,7 +110,7 @@ addState(
     }
     const imgWidth = Math.max(maxX, currentX) + IMAGE_PADDING;
     const imgHeight = currentY + maxLineHeight + IMAGE_PADDING;
-    const imgData = new Uint8ClampedArray(imgWidth * imgHeight * 4);
+    const imgData = new Uint8Array(imgWidth * imgHeight * 4);
     const imgRowSize = imgWidth << 2;
     for (let q = 0; q < count; q++) {
       const data = argsArray[iFirstPIIXO + (q << 2)][0].data;
@@ -162,17 +138,32 @@ addState(
       }
     }
 
+    const img = {
+      width: imgWidth,
+      height: imgHeight,
+    };
+    if (context.isOffscreenCanvasSupported) {
+      const canvas = new OffscreenCanvas(imgWidth, imgHeight);
+      const ctx = canvas.getContext("2d");
+      ctx.putImageData(
+        new ImageData(
+          new Uint8ClampedArray(imgData.buffer),
+          imgWidth,
+          imgHeight
+        ),
+        0,
+        0
+      );
+      img.bitmap = canvas.transferToImageBitmap();
+      img.data = null;
+    } else {
+      img.kind = ImageKind.RGBA_32BPP;
+      img.data = imgData;
+    }
+
     // Replace queue items.
     fnArray.splice(iFirstSave, count * 4, OPS.paintInlineImageXObjectGroup);
-    argsArray.splice(iFirstSave, count * 4, [
-      {
-        width: imgWidth,
-        height: imgHeight,
-        kind: ImageKind.RGBA_32BPP,
-        data: imgData,
-      },
-      map,
-    ]);
+    argsArray.splice(iFirstSave, count * 4, [img, map]);
 
     return iFirstSave + 1;
   }
@@ -216,12 +207,6 @@ addState(
     // At this point, i is the index of the first op past the last valid
     // quartet.
     let count = Math.floor((i - iFirstSave) / 4);
-    count = handlePaintSolidColorImageMask(
-      iFirstSave,
-      count,
-      fnArray,
-      argsArray
-    );
     if (count < MIN_IMAGES_IN_MASKS_BLOCK) {
       return i - ((i - iFirstSave) % 4);
     }
@@ -287,6 +272,8 @@ addState(
           data: maskParams.data,
           width: maskParams.width,
           height: maskParams.height,
+          interpolate: maskParams.interpolate,
+          count: maskParams.count,
           transform: transformArgs,
         });
       }
@@ -491,6 +478,74 @@ addState(
   }
 );
 
+// This replaces (save, transform, constructPath, restore)
+// sequences with |constructPath| operation.
+addState(
+  InitialState,
+  [OPS.save, OPS.transform, OPS.constructPath, OPS.restore],
+  context => {
+    const argsArray = context.argsArray;
+    const iFirstConstructPath = context.iCurr - 1;
+    const op = argsArray[iFirstConstructPath][0];
+
+    // When stroking the transform has to be applied to the line width too.
+    // So we can only optimize if the transform is an identity.
+    if (
+      op !== OPS.stroke &&
+      op !== OPS.closeStroke &&
+      op !== OPS.fillStroke &&
+      op !== OPS.eoFillStroke &&
+      op !== OPS.closeFillStroke &&
+      op !== OPS.closeEOFillStroke
+    ) {
+      return true;
+    }
+    const iFirstTransform = context.iCurr - 2;
+    const transform = argsArray[iFirstTransform];
+    return (
+      transform[0] === 1 &&
+      transform[1] === 0 &&
+      transform[2] === 0 &&
+      transform[3] === 1
+    );
+  },
+  () => false,
+  (context, i) => {
+    const { fnArray, argsArray } = context;
+    const curr = context.iCurr;
+    const iFirstSave = curr - 3;
+    const iFirstTransform = curr - 2;
+    const iFirstConstructPath = curr - 1;
+    const args = argsArray[iFirstConstructPath];
+    const transform = argsArray[iFirstTransform];
+    const [, [buffer], minMax] = args;
+
+    if (minMax) {
+      const newBBox = F32_BBOX_INIT.slice();
+      Util.axialAlignedBoundingBox(minMax, transform, newBBox);
+      minMax.set(newBBox);
+      for (let k = 0, kk = buffer.length; k < kk;) {
+        switch (buffer[k++]) {
+          case DrawOPS.moveTo:
+          case DrawOPS.lineTo:
+            Util.applyTransform(buffer, transform, k);
+            k += 2;
+            break;
+          case DrawOPS.curveTo:
+            Util.applyTransformToBezier(buffer, transform, k);
+            k += 6;
+            break;
+        }
+      }
+    }
+    // Replace queue items.
+    fnArray.splice(iFirstSave, 4, OPS.constructPath);
+    argsArray.splice(iFirstSave, 4, args);
+
+    return iFirstSave + 1;
+  }
+);
+
 class NullOptimizer {
   constructor(queue) {
     this.queue = queue;
@@ -517,6 +572,7 @@ class QueueOptimizer extends NullOptimizer {
       iCurr: 0,
       fnArray: queue.fnArray,
       argsArray: queue.argsArray,
+      isOffscreenCanvasSupported: OperatorList.isOffscreenCanvasSupported,
     };
     this.match = null;
     this.lastProcessed = 0;
@@ -595,28 +651,28 @@ class QueueOptimizer extends NullOptimizer {
 }
 
 class OperatorList {
-  static get CHUNK_SIZE() {
-    return shadow(this, "CHUNK_SIZE", 1000);
-  }
+  static CHUNK_SIZE = 1000;
 
   // Close to chunk size.
-  static get CHUNK_SIZE_ABOUT() {
-    return shadow(this, "CHUNK_SIZE_ABOUT", this.CHUNK_SIZE - 5);
-  }
+  static CHUNK_SIZE_ABOUT = this.CHUNK_SIZE - 5;
+
+  static isOffscreenCanvasSupported = false;
 
   constructor(intent = 0, streamSink) {
     this._streamSink = streamSink;
     this.fnArray = [];
     this.argsArray = [];
-    if (streamSink && !(intent & RenderingIntentFlag.OPLIST)) {
-      this.optimizer = new QueueOptimizer(this);
-    } else {
-      this.optimizer = new NullOptimizer(this);
-    }
+    this.optimizer =
+      streamSink && !(intent & RenderingIntentFlag.OPLIST)
+        ? new QueueOptimizer(this)
+        : new NullOptimizer(this);
     this.dependencies = new Set();
-    this._totalLength = 0;
     this.weight = 0;
     this._resolved = streamSink ? null : Promise.resolve();
+  }
+
+  static setOptions({ isOffscreenCanvasSupported }) {
+    this.isOffscreenCanvasSupported = isOffscreenCanvasSupported;
   }
 
   get length() {
@@ -625,14 +681,6 @@ class OperatorList {
 
   get ready() {
     return this._resolved || this._streamSink.ready;
-  }
-
-  /**
-   * @type {number} The total length of the entire operator list, since
-   *                `this.length === 0` after flushing.
-   */
-  get totalLength() {
-    return this._totalLength + this.length;
   }
 
   addOp(fn, args) {
@@ -648,6 +696,25 @@ class OperatorList {
         // Heuristic to flush on boundary of restore or endText.
         this.flush();
       }
+    }
+  }
+
+  addImageOps(fn, args, optionalContent, hasMask = false) {
+    if (hasMask) {
+      this.addOp(OPS.save);
+      this.addOp(OPS.setGState, [[["SMask", false]]]);
+    }
+    if (optionalContent !== undefined) {
+      this.addOp(OPS.beginMarkedContentProps, ["OC", optionalContent]);
+    }
+
+    this.addOp(fn, args);
+
+    if (optionalContent !== undefined) {
+      this.addOp(OPS.endMarkedContent, []);
+    }
+    if (hasMask) {
+      this.addOp(OPS.restore);
     }
   }
 
@@ -693,38 +760,47 @@ class OperatorList {
       switch (fnArray[i]) {
         case OPS.paintInlineImageXObject:
         case OPS.paintInlineImageXObjectGroup:
-        case OPS.paintImageMaskXObject:
-          const arg = argsArray[i][0]; // First parameter in imgData.
-
-          if (
-            typeof PDFJSDev === "undefined" ||
-            PDFJSDev.test("!PRODUCTION || TESTING")
-          ) {
-            assert(
-              arg.data instanceof Uint8ClampedArray,
-              'OperatorList._transfers: Unsupported "arg.data" type.'
-            );
+        case OPS.paintImageMaskXObject: {
+          const { bitmap, data } = argsArray[i][0]; // First parameter in imgData.
+          if (bitmap || data?.buffer) {
+            transfers.push(bitmap || data.buffer);
           }
-          if (!arg.cached) {
-            transfers.push(arg.data.buffer);
+          break;
+        }
+        case OPS.constructPath: {
+          const [, [data], minMax] = argsArray[i];
+          if (data) {
+            transfers.push(data.buffer, minMax.buffer);
           }
+          break;
+        }
+        case OPS.paintFormXObjectBegin:
+          const [matrix, bbox] = argsArray[i];
+          if (matrix) {
+            transfers.push(matrix.buffer);
+          }
+          if (bbox) {
+            transfers.push(bbox.buffer);
+          }
+          break;
+        case OPS.setTextMatrix:
+          transfers.push(argsArray[i][0].buffer);
           break;
       }
     }
     return transfers;
   }
 
-  flush(lastChunk = false) {
+  flush(lastChunk = false, separateAnnots = null) {
     this.optimizer.flush();
-    const length = this.length;
-    this._totalLength += length;
 
     this._streamSink.enqueue(
       {
         fnArray: this.fnArray,
         argsArray: this.argsArray,
         lastChunk,
-        length,
+        separateAnnots,
+        length: this.length,
       },
       1,
       this._transfers
@@ -738,4 +814,40 @@ class OperatorList {
   }
 }
 
-export { OperatorList };
+/**
+ * A subclass of OperatorList that checks whether added group or pattern
+ * operations require being drawn in isolation (i.e. on a separate canvas).
+ * A group/pattern needs isolation when it uses non-default compositing
+ * (blend mode) or a soft mask. The result is exposed via `needsIsolation`.
+ *
+ * `hasSoftMask` separately flags the use of a soft mask: unlike a plain blend
+ * mode, which a non-isolated group can apply directly against its backdrop, a
+ * soft mask always requires a real intermediate canvas (see bug 1873345).
+ */
+class CheckedOperatorList extends OperatorList {
+  needsIsolation = false;
+
+  hasSoftMask = false;
+
+  addOp(fn, args) {
+    if (!this.needsIsolation || !this.hasSoftMask) {
+      if (fn === OPS.beginGroup) {
+        // Propagate isolation only if the nested group itself needs it.
+        this.needsIsolation ||= args[0].needsIsolation;
+        this.hasSoftMask ||= args[0].hasSoftMask;
+      } else if (fn === OPS.setGState) {
+        for (const [key, val] of args[0]) {
+          if (key === "BM" && val !== "source-over") {
+            this.needsIsolation = true;
+          } else if (key === "SMask" && val !== false) {
+            this.needsIsolation = true;
+            this.hasSoftMask = true;
+          }
+        }
+      }
+    }
+    super.addOp(fn, args);
+  }
+}
+
+export { CheckedOperatorList, OperatorList };

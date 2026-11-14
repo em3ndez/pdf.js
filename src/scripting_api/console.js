@@ -13,11 +13,15 @@
  * limitations under the License.
  */
 
-import { PDFObject } from "./pdf_object.js";
+class Console {
+  #send;
 
-class Console extends PDFObject {
+  constructor({ send }) {
+    this.#send = send;
+  }
+
   clear() {
-    this._send({ id: "clear" });
+    this.#send({ id: "clear" });
   }
 
   hide() {
@@ -25,9 +29,14 @@ class Console extends PDFObject {
   }
 
   println(msg) {
-    if (typeof msg === "string") {
-      this._send({ command: "println", value: "PDF.js Console:: " + msg });
+    if (typeof msg !== "string") {
+      try {
+        msg = JSON.stringify(msg);
+      } catch {
+        msg = msg.toString?.() || "[Unserializable object]";
+      }
     }
+    this.#send({ command: "println", value: `PDF.js Console:: ${msg}` });
   }
 
   show() {

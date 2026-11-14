@@ -16,9 +16,10 @@
 // In mozilla-central, this file is loaded as non-module script,
 // so it mustn't have any dependencies.
 
-class SandboxSupportBase {
+// eslint-disable-next-line no-restricted-syntax
+export class SandboxSupportBase {
   /**
-   * @param {DOMWindow} - win
+   * @param {DOMWindow} win
    */
   constructor(win) {
     this.win = win;
@@ -29,37 +30,42 @@ class SandboxSupportBase {
   }
 
   destroy() {
-    this.commFunc = null;
-    this.timeoutIds.forEach(([_, id]) => this.win.clearTimeout(id));
+    this.commFun = null;
+    for (const id of this.timeoutIds.values()) {
+      this.win.clearTimeout(id);
+    }
     this.timeoutIds = null;
   }
 
   /**
-   * @param {Object} val - Export a value in the sandbox.
+   * @param {object} val - Export a value in the sandbox.
    */
   exportValueToSandbox(val) {
     throw new Error("Not implemented");
   }
 
   /**
-   * @param {Object} val - Import a value from the sandbox.
+   * @param {object} val - Import a value from the sandbox.
    */
   importValueFromSandbox(val) {
     throw new Error("Not implemented");
   }
 
   /**
-   * @param {String} errorMessage - Create an error in the sandbox.
+   * @param {string} errorMessage - Create an error in the sandbox.
    */
   createErrorForSandbox(errorMessage) {
     throw new Error("Not implemented");
   }
 
   /**
-   * @param {String} name - Name of the function to call in the sandbox
-   * @param {Array<Object>} args - Arguments of the function.
+   * @param {string} name - Name of the function to call in the sandbox
+   * @param {Array<object>} args - Arguments of the function.
    */
   callSandboxFunction(name, args) {
+    if (!this.commFun) {
+      return;
+    }
     try {
       args = this.exportValueToSandbox(args);
       this.commFun(name, args);
@@ -79,6 +85,13 @@ class SandboxSupportBase {
         ) {
           return;
         }
+
+        if (callbackId === 0) {
+          // This callbackId corresponds to the one used for userActivation.
+          // So here, we cancel the last userActivation.
+          this.win.clearTimeout(this.timeoutIds.get(callbackId));
+        }
+
         const id = this.win.setTimeout(() => {
           this.timeoutIds.delete(callbackId);
           this.callSandboxFunction("timeoutCb", {
@@ -88,9 +101,9 @@ class SandboxSupportBase {
         }, nMilliseconds);
         this.timeoutIds.set(callbackId, id);
       },
-      clearTimeout: id => {
-        this.win.clearTimeout(this.timeoutIds.get(id));
-        this.timeoutIds.delete(id);
+      clearTimeout: callbackId => {
+        this.win.clearTimeout(this.timeoutIds.get(callbackId));
+        this.timeoutIds.delete(callbackId);
       },
       setInterval: (callbackId, nMilliseconds) => {
         if (
@@ -107,9 +120,9 @@ class SandboxSupportBase {
         }, nMilliseconds);
         this.timeoutIds.set(callbackId, id);
       },
-      clearInterval: id => {
-        this.win.clearInterval(this.timeoutIds.get(id));
-        this.timeoutIds.delete(id);
+      clearInterval: callbackId => {
+        this.win.clearInterval(this.timeoutIds.get(callbackId));
+        this.timeoutIds.delete(callbackId);
       },
       alert: cMsg => {
         if (typeof cMsg !== "string") {
@@ -117,18 +130,12 @@ class SandboxSupportBase {
         }
         this.win.alert(cMsg);
       },
-      confirm: cMsg => {
-        if (typeof cMsg !== "string") {
-          return false;
-        }
-        return this.win.confirm(cMsg);
-      },
-      prompt: (cQuestion, cDefault) => {
-        if (typeof cQuestion !== "string" || typeof cDefault !== "string") {
-          return null;
-        }
-        return this.win.prompt(cQuestion, cDefault);
-      },
+      confirm: cMsg =>
+        typeof cMsg !== "string" ? false : this.win.confirm(cMsg),
+      prompt: (cQuestion, cDefault) =>
+        typeof cQuestion !== "string" || typeof cDefault !== "string"
+          ? null
+          : this.win.prompt(cQuestion, cDefault),
       parseURL: cUrl => {
         const url = new this.win.URL(cUrl);
         const props = [
@@ -171,11 +178,4 @@ class SandboxSupportBase {
       }
     };
   }
-}
-
-if (typeof PDFJSDev === "undefined" || !PDFJSDev.test("MOZCENTRAL")) {
-  exports.SandboxSupportBase = SandboxSupportBase;
-} else {
-  /* eslint-disable-next-line no-unused-vars, no-var */
-  var EXPORTED_SYMBOLS = ["SandboxSupportBase"];
 }

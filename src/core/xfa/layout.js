@@ -20,7 +20,8 @@ import {
   $getTemplateRoot,
   $isSplittable,
   $isThereMoreWidth,
-} from "./xfa_object.js";
+} from "./symbol_utils.js";
+import { MathClamp } from "../../shared/math_clamp.js";
 import { measureToString } from "./html_utils.js";
 
 // Subform and ExclGroup have a layout so they share these functions.
@@ -85,11 +86,7 @@ function flushHTML(node) {
     }
   }
 
-  if (html.children.length === 0) {
-    return null;
-  }
-
-  return html;
+  return html.children.length === 0 ? null : html;
 }
 
 function addHTML(node, html, bbox) {
@@ -141,13 +138,16 @@ function addHTML(node, html, bbox) {
       break;
     }
     case "table": {
-      extra.width = Math.min(availableSpace.width, Math.max(extra.width, w));
+      extra.width = MathClamp(w, extra.width, availableSpace.width);
       extra.height += h;
       extra.children.push(html);
       break;
     }
     case "tb": {
-      extra.width = availableSpace.width;
+      // Even if the subform can possibly take all the available width,
+      // we must compute the final width as it is in order to be able
+      // for example to center the subform within its parent.
+      extra.width = MathClamp(w, extra.width, availableSpace.width);
       extra.height += h;
       extra.children.push(html);
       break;
@@ -179,9 +179,9 @@ function getAvailableSpace(node) {
       };
     case "rl-row":
     case "row":
-      const width = node[$extra].columnWidths
-        .slice(node[$extra].currentColumn)
-        .reduce((a, x) => a + x);
+      const width = Math.sumPrecise(
+        node[$extra].columnWidths.slice(node[$extra].currentColumn)
+      );
       return { width, height: availableSpace.height - marginH };
     case "table":
     case "tb":
@@ -260,19 +260,20 @@ function getTransformedBBox(node) {
  * in case of lr-tb or changing content area...).
  */
 function checkDimensions(node, space) {
-  if (node[$getTemplateRoot]()[$extra].firstUnsplittable === null) {
-    return true;
-  }
-
-  if (node.w === 0 || node.h === 0) {
+  if (
+    node[$getTemplateRoot]()[$extra].firstUnsplittable === null ||
+    node.w === 0 ||
+    node.h === 0
+  ) {
     return true;
   }
 
   const ERROR = 2;
   const parent = node[$getSubformParent]();
-  const attempt = (parent[$extra] && parent[$extra].attempt) || 0;
+  const attempt = parent[$extra]?.attempt || 0;
 
   const [, y, w, h] = getTransformedBBox(node);
+  /* eslint-disable unicorn/prefer-ternary */
   switch (parent.layout) {
     case "lr-tb":
     case "rl-tb":
@@ -354,11 +355,11 @@ function checkDimensions(node, space) {
 
       return space.height > ERROR;
     case "position":
-      if (node[$getTemplateRoot]()[$extra].noLayoutFailure) {
-        return true;
-      }
-
-      if (node.h === "" || Math.round(h + y - space.height) <= ERROR) {
+      if (
+        node[$getTemplateRoot]()[$extra].noLayoutFailure ||
+        node.h === "" ||
+        Math.round(h + y - space.height) <= ERROR
+      ) {
         return true;
       }
 
@@ -378,6 +379,7 @@ function checkDimensions(node, space) {
       // No layout, so accept everything.
       return true;
   }
+  /* eslint-enable unicorn/prefer-ternary */
 }
 
 export { addHTML, checkDimensions, flushHTML, getAvailableSpace };

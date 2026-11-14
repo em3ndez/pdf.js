@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 
-import { MurmurHash3_64 } from "../../src/core/murmurhash3.js";
+import { MurmurHash3_64 } from "../../src/shared/murmurhash3.js";
 
 describe("MurmurHash3_64", function () {
   it("instantiates without seed", function () {
@@ -42,6 +42,12 @@ describe("MurmurHash3_64", function () {
     const hash = new MurmurHash3_64();
     hash.update(new Uint32Array(new Uint8Array(sourceCharCodes).buffer));
     expect(hash.hexdigest()).toEqual(hexDigestExpected);
+  });
+  it("throws an exception for unsupported input types", function () {
+    const hash = new MurmurHash3_64();
+    expect(() => hash.update(42)).toThrowError(
+      "Invalid data format, must be a string or TypedArray."
+    );
   });
 
   it("changes the hash after update without seed", function () {

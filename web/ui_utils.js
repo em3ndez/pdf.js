@@ -13,17 +13,15 @@
  * limitations under the License.
  */
 
-const CSS_UNITS = 96.0 / 72.0;
 const DEFAULT_SCALE_VALUE = "auto";
 const DEFAULT_SCALE = 1.0;
+const DEFAULT_SCALE_DELTA = 1.1;
 const MIN_SCALE = 0.1;
-const MAX_SCALE = 10.0;
+const MAX_SCALE = 25.0;
 const UNKNOWN_SCALE = 0;
 const MAX_AUTO_SCALE = 1.25;
 const SCROLLBAR_PADDING = 40;
 const VERTICAL_PADDING = 5;
-
-const LOADINGBAR_END_OFFSET_VAR = "--loadingBar-end-offset";
 
 const PresentationModeState = {
   UNKNOWN: 0,
@@ -41,15 +39,10 @@ const SidebarView = {
   LAYERS: 4,
 };
 
-const RendererType = {
-  CANVAS: "canvas",
-  SVG: "svg",
-};
-
 const TextLayerMode = {
   DISABLE: 0,
   ENABLE: 1,
-  ENABLE_ENHANCE: 2,
+  ENABLE_PERMISSIONS: 2,
 };
 
 const ScrollMode = {
@@ -57,6 +50,7 @@ const ScrollMode = {
   VERTICAL: 0, // Default value.
   HORIZONTAL: 1,
   WRAPPED: 2,
+  PAGE: 3,
 };
 
 const SpreadMode = {
@@ -66,40 +60,24 @@ const SpreadMode = {
   EVEN: 2,
 };
 
+const CursorTool = {
+  SELECT: 0, // The default value.
+  HAND: 1,
+  ZOOM: 2,
+};
+
 // Used by `PDFViewerApplication`, and by the API unit-tests.
 const AutoPrintRegExp = /\bprint\s*\(/;
 
 /**
- * Returns scale factor for the canvas. It makes sense for the HiDPI displays.
- * @returns {Object} The object with horizontal (sx) and vertical (sy)
- *                   scales. The scaled property is set to false if scaling is
- *                   not required, true otherwise.
- */
-function getOutputScale(ctx) {
-  const devicePixelRatio = window.devicePixelRatio || 1;
-  const backingStoreRatio =
-    ctx.webkitBackingStorePixelRatio ||
-    ctx.mozBackingStorePixelRatio ||
-    ctx.backingStorePixelRatio ||
-    1;
-  const pixelRatio = devicePixelRatio / backingStoreRatio;
-  return {
-    sx: pixelRatio,
-    sy: pixelRatio,
-    scaled: pixelRatio !== 1,
-  };
-}
-
-/**
  * Scrolls specified element into view of its parent.
- * @param {Object} element - The element to be visible.
- * @param {Object} spot - An object with optional top and left properties,
+ * @param {HTMLElement} element - The element to be visible.
+ * @param {object} [spot] - An object with optional top and left properties,
  *   specifying the offset from the top left edge.
- * @param {boolean} [scrollMatches] - When scrolling search results into view,
- *   ignore elements that either: Contains marked content identifiers,
- *   or have the CSS-rule `overflow: hidden;` set. The default value is `false`.
+ * @param {number} [spot.left]
+ * @param {number} [spot.top]
  */
-function scrollIntoView(element, spot, scrollMatches = false) {
+function scrollIntoView(element, spot) {
   // Assuming offsetParent is available (it's not available when viewer is in
   // hidden iframe or object). We have to scroll: if the offsetParent is not set
   // producing the error. See also animationStarted.
@@ -111,11 +89,8 @@ function scrollIntoView(element, spot, scrollMatches = false) {
   let offsetY = element.offsetTop + element.clientTop;
   let offsetX = element.offsetLeft + element.clientLeft;
   while (
-    (parent.clientHeight === parent.scrollHeight &&
-      parent.clientWidth === parent.scrollWidth) ||
-    (scrollMatches &&
-      (parent.classList.contains("markedContent") ||
-        getComputedStyle(parent).overflow === "hidden"))
+    parent.clientHeight === parent.scrollHeight &&
+    parent.clientWidth === parent.scrollWidth
   ) {
     offsetY += parent.offsetTop;
     offsetX += parent.offsetLeft;
@@ -141,58 +116,76 @@ function scrollIntoView(element, spot, scrollMatches = false) {
  * Helper function to start monitoring the scroll event and converting them into
  * PDF.js friendly one: with scroll debounce and scroll direction.
  */
-function watchScroll(viewAreaElement, callback) {
-  const debounceScroll = function (evt) {
-    if (rAF) {
-      return;
-    }
-    // schedule an invocation of scroll for next animation frame.
-    rAF = window.requestAnimationFrame(function viewAreaElementScrolled() {
-      rAF = null;
+function watchScroll(viewAreaElement, callback, abortSignal = undefined) {
+  function onRAF() {
+    rAF = null;
 
-      const currentX = viewAreaElement.scrollLeft;
-      const lastX = state.lastX;
-      if (currentX !== lastX) {
-        state.right = currentX > lastX;
-      }
-      state.lastX = currentX;
-      const currentY = viewAreaElement.scrollTop;
-      const lastY = state.lastY;
-      if (currentY !== lastY) {
-        state.down = currentY > lastY;
-      }
-      state.lastY = currentY;
-      callback(state);
-    });
-  };
+    const currentX = viewAreaElement.scrollLeft;
+    const lastX = state.lastX;
+    if (currentX !== lastX) {
+      state.right = currentX > lastX;
+    }
+    state.lastX = currentX;
+    const currentY = viewAreaElement.scrollTop;
+    const lastY = state.lastY;
+    if (currentY !== lastY) {
+      state.down = currentY > lastY;
+    }
+    state.lastY = currentY;
+    callback(state);
+  }
 
   const state = {
     right: true,
     down: true,
     lastX: viewAreaElement.scrollLeft,
     lastY: viewAreaElement.scrollTop,
-    _eventHandler: debounceScroll,
   };
 
   let rAF = null;
-  viewAreaElement.addEventListener("scroll", debounceScroll, true);
+  viewAreaElement.addEventListener(
+    "scroll",
+    () => {
+      // Schedule an invocation of scroll for next animation frame, when needed.
+      rAF ??= window.requestAnimationFrame(onRAF);
+    },
+    { useCapture: true, signal: abortSignal }
+  );
+  abortSignal?.addEventListener(
+    "abort",
+    () => window.cancelAnimationFrame(rAF),
+    { once: true }
+  );
   return state;
 }
 
 /**
  * Helper function to parse query string (e.g. ?param1=value&param2=...).
- * @param {string}
+ * @param {string} query
  * @returns {Map}
  */
 function parseQueryString(query) {
   const params = new Map();
-  for (const part of query.split("&")) {
-    const param = part.split("="),
-      key = param[0].toLowerCase(),
-      value = param.length > 1 ? param[1] : "";
-    params.set(decodeURIComponent(key), decodeURIComponent(value));
+  for (const [key, value] of new URLSearchParams(query)) {
+    params.set(key.toLowerCase(), value);
   }
   return params;
+}
+
+// eslint-disable-next-line no-control-regex
+const InvisibleCharsRegExp = /[\x00-\x1F]/g;
+
+/**
+ * @param {string} str
+ * @param {boolean} [replaceInvisible]
+ */
+function removeNullCharacters(str, replaceInvisible = false) {
+  if (!InvisibleCharsRegExp.test(str)) {
+    return str;
+  }
+  return replaceInvisible
+    ? str.replaceAll(InvisibleCharsRegExp, m => (m === "\x00" ? "" : " "))
+    : str.replaceAll("\x00", "");
 }
 
 /**
@@ -200,12 +193,11 @@ function parseQueryString(query) {
  * passes a given condition. The items are expected to be sorted in the sense
  * that if the condition is true for one item in the array, then it is also true
  * for all following items.
- *
  * @returns {number} Index of the first array element to pass the test,
  *                   or |items.length| if no such element exists.
  */
-function binarySearchFirstItem(items, condition) {
-  let minIndex = 0;
+function binarySearchFirstItem(items, condition, start = 0) {
+  let minIndex = start;
   let maxIndex = items.length - 1;
 
   if (maxIndex < 0 || !condition(items[maxIndex])) {
@@ -227,12 +219,16 @@ function binarySearchFirstItem(items, condition) {
   return minIndex; /* === maxIndex */
 }
 
+// Used to add a fast-path for non-integer numbers in `approximateFraction`.
+const ApproximateFractionCache = new Map();
+
 /**
  *  Approximates float number as a fraction using Farey sequence (max order
  *  of 8).
  *  @param {number} x - Positive float number.
  *  @returns {Array} Estimated fraction: the first array item is a numerator,
  *                   the second one is a denominator.
+ *                   They are both natural numbers.
  */
 function approximateFraction(x) {
   // Fast paths for int numbers or their inversions.
@@ -247,6 +243,10 @@ function approximateFraction(x) {
     return [1, xinv];
   }
 
+  const cached = ApproximateFractionCache.get(x);
+  if (cached) {
+    return cached.slice();
+  }
   const x_ = x > 1 ? xinv : x;
   // a/b and c/d are neighbours in Farey sequence.
   let a = 0,
@@ -269,30 +269,34 @@ function approximateFraction(x) {
       b = q;
     }
   }
-  let result;
   // Select closest of the neighbours to x.
+  let res;
   if (x_ - a / b < c / d - x_) {
-    result = x_ === x ? [a, b] : [b, a];
+    res = x_ === x ? [a, b] : [b, a];
   } else {
-    result = x_ === x ? [c, d] : [d, c];
+    res = x_ === x ? [c, d] : [d, c];
   }
-  return result;
-}
-
-function roundToDivide(x, div) {
-  const r = x % div;
-  return r === 0 ? x : Math.round(x - r + div);
+  ApproximateFractionCache.set(x, res);
+  return res;
 }
 
 /**
- * @typedef {Object} GetPageSizeInchesParameters
+ * @param {number} x - A positive number to round to a multiple of `div`.
+ * @param {number} div - A natural number.
+ */
+function floorToDivide(x, div) {
+  return x - (x % div);
+}
+
+/**
+ * @typedef {object} GetPageSizeInchesParameters
  * @property {number[]} view
  * @property {number} userUnit
  * @property {number} rotate
  */
 
 /**
- * @typedef {Object} PageSize
+ * @typedef {object} PageSize
  * @property {number} width - In inches.
  * @property {number} height - In inches.
  */
@@ -318,7 +322,6 @@ function getPageSizeInches({ view, userUnit, rotate }) {
 
 /**
  * Helper function for getVisibleElements.
- *
  * @param {number} index - initial guess at the first visible element
  * @param {Array} views - array of pages, into which `index` is an index
  * @param {number} top - the top of the scroll pane
@@ -401,8 +404,13 @@ function backtrackBeforeAllVisibleElements(index, views, top) {
   return index;
 }
 
+function visibleSort(a, b) {
+  const pc = a.percent - b.percent;
+  return Math.abs(pc) > 0.001 ? -pc : a.id - b.id; // ensure stability
+}
+
 /**
- * @typedef {Object} GetVisibleElementsParameters
+ * @typedef {object} GetVisibleElementsParameters
  * @property {HTMLElement} scrollEl - A container that can possibly scroll.
  * @property {Array} views - Objects with a `div` property that contains an
  *   HTMLElement, which should all be descendants of `scrollEl` satisfying the
@@ -432,9 +440,8 @@ function backtrackBeforeAllVisibleElements(index, views, top) {
  * question. For pages, that ends up being equivalent to the bounding box of the
  * rendering canvas. Earlier and later refer to index in `views`, not page
  * layout.)
- *
- * @param {GetVisibleElementsParameters}
- * @returns {Object} `{ first, last, views: [{ id, x, y, view, percent }] }`
+ * @param {GetVisibleElementsParameters} params
+ * @returns {object} `{ first, last, views: [{ id, x, y, view, percent }] }`
  */
 function getVisibleElements({
   scrollEl,
@@ -472,6 +479,7 @@ function getVisibleElements({
   }
 
   const visible = [],
+    ids = new Set(),
     numViews = views.length;
   let firstVisibleElementInd = binarySearchFirstItem(
     views,
@@ -540,10 +548,11 @@ function getVisibleElements({
       continue;
     }
 
-    const hiddenHeight =
-      Math.max(0, top - currentHeight) + Math.max(0, viewBottom - bottom);
-    const hiddenWidth =
-      Math.max(0, left - currentWidth) + Math.max(0, viewRight - right);
+    const minY = Math.max(0, top - currentHeight);
+    const minX = Math.max(0, left - currentWidth);
+
+    const hiddenHeight = minY + Math.max(0, viewBottom - bottom);
+    const hiddenWidth = minX + Math.max(0, viewRight - right);
 
     const fractionHeight = (viewHeight - hiddenHeight) / viewHeight,
       fractionWidth = (viewWidth - hiddenWidth) / viewWidth;
@@ -553,32 +562,32 @@ function getVisibleElements({
       id: view.id,
       x: currentWidth,
       y: currentHeight,
+      visibleArea:
+        // We only specify which part of the page is visible when it's not
+        // the full page, as there is no point in handling a partial page
+        // rendering otherwise.
+        percent === 100
+          ? null
+          : {
+              minX,
+              minY,
+              maxX: Math.min(viewRight, right) - currentWidth,
+              maxY: Math.min(viewBottom, bottom) - currentHeight,
+            },
       view,
       percent,
       widthPercent: (fractionWidth * 100) | 0,
     });
+    ids.add(view.id);
   }
 
   const first = visible[0],
-    last = visible[visible.length - 1];
+    last = visible.at(-1);
 
   if (sortByVisibility) {
-    visible.sort(function (a, b) {
-      const pc = a.percent - b.percent;
-      if (Math.abs(pc) > 0.001) {
-        return -pc;
-      }
-      return a.id - b.id; // ensure stability
-    });
+    visible.sort(visibleSort);
   }
-  return { first, last, views: visible };
-}
-
-/**
- * Event handler to suppress context menu.
- */
-function noContextMenuHandler(evt) {
-  evt.preventDefault();
+  return { first, last, views: visible, ids };
 }
 
 function normalizeWheelEventDirection(evt) {
@@ -592,17 +601,16 @@ function normalizeWheelEventDirection(evt) {
 }
 
 function normalizeWheelEventDelta(evt) {
+  const deltaMode = evt.deltaMode; // Avoid being affected by bug 1392460.
   let delta = normalizeWheelEventDirection(evt);
 
-  const MOUSE_DOM_DELTA_PIXEL_MODE = 0;
-  const MOUSE_DOM_DELTA_LINE_MODE = 1;
   const MOUSE_PIXELS_PER_LINE = 30;
   const MOUSE_LINES_PER_PAGE = 30;
 
   // Converts delta to per-page units
-  if (evt.deltaMode === MOUSE_DOM_DELTA_PIXEL_MODE) {
+  if (deltaMode === WheelEvent.DOM_DELTA_PIXEL) {
     delta /= MOUSE_PIXELS_PER_LINE * MOUSE_LINES_PER_PAGE;
-  } else if (evt.deltaMode === MOUSE_DOM_DELTA_LINE_MODE) {
+  } else if (deltaMode === WheelEvent.DOM_DELTA_LINE) {
     delta /= MOUSE_LINES_PER_PAGE;
   }
   return delta;
@@ -632,63 +640,6 @@ function isPortraitOrientation(size) {
   return size.width <= size.height;
 }
 
-const WaitOnType = {
-  EVENT: "event",
-  TIMEOUT: "timeout",
-};
-
-/**
- * @typedef {Object} WaitOnEventOrTimeoutParameters
- * @property {Object} target - The event target, can for example be:
- *   `window`, `document`, a DOM element, or an {EventBus} instance.
- * @property {string} name - The name of the event.
- * @property {number} delay - The delay, in milliseconds, after which the
- *   timeout occurs (if the event wasn't already dispatched).
- */
-
-/**
- * Allows waiting for an event or a timeout, whichever occurs first.
- * Can be used to ensure that an action always occurs, even when an event
- * arrives late or not at all.
- *
- * @param {WaitOnEventOrTimeoutParameters}
- * @returns {Promise} A promise that is resolved with a {WaitOnType} value.
- */
-function waitOnEventOrTimeout({ target, name, delay = 0 }) {
-  return new Promise(function (resolve, reject) {
-    if (
-      typeof target !== "object" ||
-      !(name && typeof name === "string") ||
-      !(Number.isInteger(delay) && delay >= 0)
-    ) {
-      throw new Error("waitOnEventOrTimeout - invalid parameters.");
-    }
-
-    function handler(type) {
-      if (target instanceof EventBus) {
-        target._off(name, eventHandler);
-      } else {
-        target.removeEventListener(name, eventHandler);
-      }
-
-      if (timeout) {
-        clearTimeout(timeout);
-      }
-      resolve(type);
-    }
-
-    const eventHandler = handler.bind(null, WaitOnType.EVENT);
-    if (target instanceof EventBus) {
-      target._on(name, eventHandler);
-    } else {
-      target.addEventListener(name, eventHandler);
-    }
-
-    const timeoutHandler = handler.bind(null, WaitOnType.TIMEOUT);
-    const timeout = setTimeout(timeoutHandler, delay);
-  });
-}
-
 /**
  * Promise that is resolved when DOM window becomes visible.
  */
@@ -706,184 +657,43 @@ const animationStarted = new Promise(function (resolve) {
   window.requestAnimationFrame(resolve);
 });
 
-/**
- * NOTE: Only used to support various PDF viewer tests in `mozilla-central`.
- */
-function dispatchDOMEvent(eventName, args = null) {
-  if (typeof PDFJSDev !== "undefined" && !PDFJSDev.test("MOZCENTRAL")) {
-    throw new Error("Not implemented: dispatchDOMEvent");
-  }
-  const details = Object.create(null);
-  if (args?.length > 0) {
-    const obj = args[0];
-    for (const key in obj) {
-      const value = obj[key];
-      if (key === "source") {
-        if (value === window || value === document) {
-          return; // No need to re-dispatch (already) global events.
-        }
-        continue; // Ignore the `source` property.
-      }
-      details[key] = value;
-    }
-  }
-  const event = document.createEvent("CustomEvent");
-  event.initCustomEvent(eventName, true, true, details);
-  document.dispatchEvent(event);
-}
-
-/**
- * Simple event bus for an application. Listeners are attached using the `on`
- * and `off` methods. To raise an event, the `dispatch` method shall be used.
- */
-class EventBus {
-  constructor(options) {
-    this._listeners = Object.create(null);
-
-    if (typeof PDFJSDev === "undefined" || PDFJSDev.test("MOZCENTRAL")) {
-      this._isInAutomation = options?.isInAutomation === true;
-    }
-  }
-
-  /**
-   * @param {string} eventName
-   * @param {function} listener
-   * @param {Object} [options]
-   */
-  on(eventName, listener, options = null) {
-    this._on(eventName, listener, {
-      external: true,
-      once: options?.once,
-    });
-  }
-
-  /**
-   * @param {string} eventName
-   * @param {function} listener
-   * @param {Object} [options]
-   */
-  off(eventName, listener, options = null) {
-    this._off(eventName, listener, {
-      external: true,
-      once: options?.once,
-    });
-  }
-
-  dispatch(eventName) {
-    const eventListeners = this._listeners[eventName];
-    if (!eventListeners || eventListeners.length === 0) {
-      if (
-        (typeof PDFJSDev === "undefined" || PDFJSDev.test("MOZCENTRAL")) &&
-        this._isInAutomation
-      ) {
-        const args = Array.prototype.slice.call(arguments, 1);
-        dispatchDOMEvent(eventName, args);
-      }
-      return;
-    }
-    // Passing all arguments after the eventName to the listeners.
-    const args = Array.prototype.slice.call(arguments, 1);
-    let externalListeners;
-    // Making copy of the listeners array in case if it will be modified
-    // during dispatch.
-    for (const { listener, external, once } of eventListeners.slice(0)) {
-      if (once) {
-        this._off(eventName, listener);
-      }
-      if (external) {
-        (externalListeners ||= []).push(listener);
-        continue;
-      }
-      listener.apply(null, args);
-    }
-    // Dispatch any "external" listeners *after* the internal ones, to give the
-    // viewer components time to handle events and update their state first.
-    if (externalListeners) {
-      for (const listener of externalListeners) {
-        listener.apply(null, args);
-      }
-      externalListeners = null;
-    }
-    if (
-      (typeof PDFJSDev === "undefined" || PDFJSDev.test("MOZCENTRAL")) &&
-      this._isInAutomation
-    ) {
-      dispatchDOMEvent(eventName, args);
-    }
-  }
-
-  /**
-   * @ignore
-   */
-  _on(eventName, listener, options = null) {
-    const eventListeners = (this._listeners[eventName] ||= []);
-    eventListeners.push({
-      listener,
-      external: options?.external === true,
-      once: options?.once === true,
-    });
-  }
-
-  /**
-   * @ignore
-   */
-  _off(eventName, listener, options = null) {
-    const eventListeners = this._listeners[eventName];
-    if (!eventListeners) {
-      return;
-    }
-    for (let i = 0, ii = eventListeners.length; i < ii; i++) {
-      if (eventListeners[i].listener === listener) {
-        eventListeners.splice(i, 1);
-        return;
-      }
-    }
-  }
-}
-
-function clamp(v, min, max) {
-  return Math.min(Math.max(v, min), max);
-}
+const docStyle =
+  typeof PDFJSDev !== "undefined" &&
+  PDFJSDev.test("LIB") &&
+  typeof document === "undefined"
+    ? null
+    : document.documentElement.style;
 
 class ProgressBar {
-  constructor(id, { height, width, units } = {}) {
-    this.visible = true;
+  #classList = null;
 
-    // Fetch the sub-elements for later.
-    this.div = document.querySelector(id + " .progress");
-    // Get the loading bar element, so it can be resized to fit the viewer.
-    this.bar = this.div.parentNode;
+  #disableAutoFetchTimeout = null;
 
-    // Get options, with sensible defaults.
-    this.height = height || 100;
-    this.width = width || 100;
-    this.units = units || "%";
+  #percent = 0;
 
-    // Initialize heights.
-    this.div.style.height = this.height + this.units;
-    this.percent = 0;
-  }
+  #style = null;
 
-  _updateBar() {
-    if (this._indeterminate) {
-      this.div.classList.add("indeterminate");
-      this.div.style.width = this.width + this.units;
-      return;
-    }
+  #visible = true;
 
-    this.div.classList.remove("indeterminate");
-    const progressSize = (this.width * this._percent) / 100;
-    this.div.style.width = progressSize + this.units;
+  constructor(bar) {
+    this.#classList = bar.classList;
+    this.#style = bar.style;
   }
 
   get percent() {
-    return this._percent;
+    return this.#percent;
   }
 
   set percent(val) {
-    this._indeterminate = isNaN(val);
-    this._percent = clamp(val, 0, 100);
-    this._updateBar();
+    this.#percent = val;
+
+    if (isNaN(val)) {
+      this.#classList.add("indeterminate");
+      return;
+    }
+    this.#classList.remove("indeterminate");
+
+    this.#style.setProperty("--progressBar-percent", `${this.#percent}%`);
   }
 
   setWidth(viewer) {
@@ -893,46 +703,42 @@ class ProgressBar {
     const container = viewer.parentNode;
     const scrollbarWidth = container.offsetWidth - viewer.offsetWidth;
     if (scrollbarWidth > 0) {
-      const doc = document.documentElement;
-      doc.style.setProperty(LOADINGBAR_END_OFFSET_VAR, `${scrollbarWidth}px`);
+      this.#style.setProperty(
+        "--progressBar-end-offset",
+        `${scrollbarWidth}px`
+      );
     }
+  }
+
+  setDisableAutoFetch(delay = /* ms = */ 5000) {
+    if (this.#percent === 100 || isNaN(this.#percent)) {
+      return;
+    }
+    if (this.#disableAutoFetchTimeout) {
+      clearTimeout(this.#disableAutoFetchTimeout);
+    }
+    this.show();
+
+    this.#disableAutoFetchTimeout = setTimeout(() => {
+      this.#disableAutoFetchTimeout = null;
+      this.hide();
+    }, delay);
   }
 
   hide() {
-    if (!this.visible) {
+    if (!this.#visible) {
       return;
     }
-    this.visible = false;
-    this.bar.classList.add("hidden");
+    this.#visible = false;
+    this.#classList.add("hidden");
   }
 
   show() {
-    if (this.visible) {
+    if (this.#visible) {
       return;
     }
-    this.visible = true;
-    this.bar.classList.remove("hidden");
-  }
-}
-
-/**
- * Moves all elements of an array that satisfy condition to the end of the
- * array, preserving the order of the rest.
- */
-function moveToEndOfArray(arr, condition) {
-  const moved = [],
-    len = arr.length;
-  let write = 0;
-  for (let read = 0; read < len; ++read) {
-    if (condition(arr[read])) {
-      moved.push(arr[read]);
-    } else {
-      arr[write] = arr[read];
-      ++write;
-    }
-  }
-  for (let read = 0; write < len; ++read, ++write) {
-    arr[write] = moved[read];
+    this.#visible = true;
+    this.#classList.remove("hidden");
   }
 }
 
@@ -941,7 +747,6 @@ function moveToEndOfArray(arr, condition) {
  *
  * Recursively search for the truly active or focused element in case there are
  * shadow DOMs.
- *
  * @returns {Element} the truly active or focused element.
  */
 function getActiveOrFocusedElement() {
@@ -960,25 +765,33 @@ function getActiveOrFocusedElement() {
 
 /**
  * Converts API PageLayout values to the format used by `BaseViewer`.
- * NOTE: This is supported to the extent that the viewer implements the
- *       necessary Scroll/Spread modes (since SinglePage, TwoPageLeft,
- *       and TwoPageRight all suggests using non-continuous scrolling).
- * @param {string} mode - The API PageLayout value.
- * @returns {number} A value from {SpreadMode}.
+ * @param {string} layout - The API PageLayout value.
+ * @returns {object}
  */
-function apiPageLayoutToSpreadMode(layout) {
+function apiPageLayoutToViewerModes(layout) {
+  let scrollMode = ScrollMode.VERTICAL,
+    spreadMode = SpreadMode.NONE;
+
   switch (layout) {
     case "SinglePage":
+      scrollMode = ScrollMode.PAGE;
+      break;
     case "OneColumn":
-      return SpreadMode.NONE;
-    case "TwoColumnLeft":
+      break;
     case "TwoPageLeft":
-      return SpreadMode.ODD;
-    case "TwoColumnRight":
+      scrollMode = ScrollMode.PAGE;
+    /* falls through */
+    case "TwoColumnLeft":
+      spreadMode = SpreadMode.ODD;
+      break;
     case "TwoPageRight":
-      return SpreadMode.EVEN;
+      scrollMode = ScrollMode.PAGE;
+    /* falls through */
+    case "TwoColumnRight":
+      spreadMode = SpreadMode.EVEN;
+      break;
   }
-  return SpreadMode.NONE; // Default value.
+  return { scrollMode, spreadMode };
 }
 
 /**
@@ -1005,20 +818,62 @@ function apiPageModeToSidebarView(mode) {
   return SidebarView.NONE; // Default value.
 }
 
+function toggleCheckedBtn(button, toggle, view = null) {
+  button.classList.toggle("toggled", toggle);
+  button.setAttribute("aria-checked", toggle);
+
+  view?.classList.toggle("hidden", !toggle);
+}
+
+function toggleSelectedBtn(button, toggle, view = null) {
+  button.classList.toggle("selected", toggle);
+  button.setAttribute("aria-selected", toggle);
+
+  view?.classList.toggle("hidden", !toggle);
+}
+
+function toggleExpandedBtn(button, toggle, view = null) {
+  button.classList.toggle("toggled", toggle);
+  button.setAttribute("aria-expanded", toggle);
+
+  view?.classList.toggle("hidden", !toggle);
+}
+
+// In Firefox, the css calc function uses f32 precision but the Chrome or Safari
+// are using f64 one. So in order to have the same rendering in all browsers, we
+// need to use the right precision in order to have correct dimensions.
+const calcRound =
+  typeof PDFJSDev !== "undefined" && PDFJSDev.test("MOZCENTRAL")
+    ? Math.fround
+    : (function () {
+        if (
+          typeof PDFJSDev !== "undefined" &&
+          PDFJSDev.test("LIB") &&
+          typeof document === "undefined"
+        ) {
+          return x => x;
+        }
+        const e = document.createElement("div");
+        e.style.width = "round(down, calc(1.6666666666666665 * 792px), 1px)";
+        return e.style.width === "calc(1320px)" ? Math.fround : x => x;
+      })();
+
 export {
   animationStarted,
-  apiPageLayoutToSpreadMode,
+  apiPageLayoutToViewerModes,
   apiPageModeToSidebarView,
   approximateFraction,
   AutoPrintRegExp,
   backtrackBeforeAllVisibleElements, // only exported for testing
   binarySearchFirstItem,
-  CSS_UNITS,
+  calcRound,
+  CursorTool,
   DEFAULT_SCALE,
+  DEFAULT_SCALE_DELTA,
   DEFAULT_SCALE_VALUE,
-  EventBus,
+  docStyle,
+  floorToDivide,
   getActiveOrFocusedElement,
-  getOutputScale,
   getPageSizeInches,
   getVisibleElements,
   isPortraitOrientation,
@@ -1028,24 +883,22 @@ export {
   MAX_AUTO_SCALE,
   MAX_SCALE,
   MIN_SCALE,
-  moveToEndOfArray,
-  noContextMenuHandler,
   normalizeWheelEventDelta,
   normalizeWheelEventDirection,
   parseQueryString,
   PresentationModeState,
   ProgressBar,
-  RendererType,
-  roundToDivide,
+  removeNullCharacters,
   SCROLLBAR_PADDING,
   scrollIntoView,
   ScrollMode,
   SidebarView,
   SpreadMode,
   TextLayerMode,
+  toggleCheckedBtn,
+  toggleExpandedBtn,
+  toggleSelectedBtn,
   UNKNOWN_SCALE,
   VERTICAL_PADDING,
-  waitOnEventOrTimeout,
-  WaitOnType,
   watchScroll,
 };

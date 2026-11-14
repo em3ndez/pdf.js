@@ -1,5 +1,4 @@
-/*
- * Copyright 2013 Mozilla Foundation
+/* Copyright 2013 Mozilla Foundation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,61 +13,10 @@
  * limitations under the License.
  */
 
-const base64alphabet =
-  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
-
-function decodeFontData(base64) {
-  const result = [];
-
-  let bits = 0,
-    bitsLength = 0;
-  for (let i = 0, ii = base64.length; i < ii; i++) {
-    const ch = base64[i];
-    if (ch <= " ") {
-      continue;
-    }
-    const index = base64alphabet.indexOf(ch);
-    if (index < 0) {
-      throw new Error("Invalid character");
-    }
-    if (index >= 64) {
-      break;
-    }
-    bits = (bits << 6) | index;
-    bitsLength += 6;
-    if (bitsLength >= 8) {
-      bitsLength -= 8;
-      const code = (bits >> bitsLength) & 0xff;
-      result.push(code);
-    }
-  }
-  return new Uint8Array(result);
-}
-
-function encodeFontData(data) {
-  let buffer = "";
-  let i, n;
-  for (i = 0, n = data.length; i < n; i += 3) {
-    const b1 = data[i] & 0xff;
-    const b2 = data[i + 1] & 0xff;
-    const b3 = data[i + 2] & 0xff;
-    const d1 = b1 >> 2,
-      d2 = ((b1 & 3) << 4) | (b2 >> 4);
-    const d3 = i + 1 < n ? ((b2 & 0xf) << 2) | (b3 >> 6) : 64;
-    const d4 = i + 2 < n ? b3 & 0x3f : 64;
-    buffer +=
-      base64alphabet.charAt(d1) +
-      base64alphabet.charAt(d2) +
-      base64alphabet.charAt(d3) +
-      base64alphabet.charAt(d4);
-  }
-  return buffer;
-}
-
 async function ttx(data) {
   const response = await fetch("/ttx", {
     method: "POST",
-    body: encodeFontData(data),
+    body: data.toBase64(),
   });
 
   if (!response.ok) {
@@ -84,4 +32,4 @@ function verifyTtxOutput(output) {
   }
 }
 
-export { decodeFontData, encodeFontData, ttx, verifyTtxOutput };
+export { ttx, verifyTtxOutput };

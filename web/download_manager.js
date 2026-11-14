@@ -13,8 +13,8 @@
  * limitations under the License.
  */
 
-import { createObjectURL, createValidAbsoluteUrl, isPdfFile } from "pdfjs-lib";
-import { compatibilityParams } from "./app_options.js";
+import { BaseDownloadManager } from "./base_download_manager.js";
+import { createValidAbsoluteUrl } from "pdfjs-lib";
 
 if (typeof PDFJSDev !== "undefined" && !PDFJSDev.test("CHROME || GENERIC")) {
   throw new Error(
@@ -23,103 +23,41 @@ if (typeof PDFJSDev !== "undefined" && !PDFJSDev.test("CHROME || GENERIC")) {
   );
 }
 
-function download(blobUrl, filename) {
-  const a = document.createElement("a");
-  if (!a.click) {
-    throw new Error('DownloadManager: "a.click()" is not supported.');
-  }
-  a.href = blobUrl;
-  a.target = "_parent";
-  // Use a.download if available. This increases the likelihood that
-  // the file is downloaded instead of opened by another PDF plugin.
-  if ("download" in a) {
-    a.download = filename;
-  }
-  // <a> must be in the document for recent Firefox versions,
-  // otherwise .click() is ignored.
-  (document.body || document.documentElement).appendChild(a);
-  a.click();
-  a.remove();
-}
-
-class DownloadManager {
-  constructor() {
-    this._openBlobUrls = new WeakMap();
-  }
-
-  downloadUrl(url, filename) {
-    if (!createValidAbsoluteUrl(url, "http://example.com")) {
-      return; // restricted/invalid URL
-    }
-    download(url + "#pdfjs.action=download", filename);
-  }
-
-  downloadData(data, filename, contentType) {
-    const blobUrl = createObjectURL(
-      data,
-      contentType,
-      compatibilityParams.disableCreateObjectURL
-    );
-    download(blobUrl, filename);
-  }
-
-  /**
-   * @returns {boolean} Indicating if the data was opened.
-   */
-  openOrDownloadData(element, data, filename) {
-    const isPdfData = isPdfFile(filename);
-    const contentType = isPdfData ? "application/pdf" : "";
-
-    if (isPdfData && !compatibilityParams.disableCreateObjectURL) {
-      let blobUrl = this._openBlobUrls.get(element);
-      if (!blobUrl) {
-        blobUrl = URL.createObjectURL(new Blob([data], { type: contentType }));
-        this._openBlobUrls.set(element, blobUrl);
+class DownloadManager extends BaseDownloadManager {
+  _triggerDownload(blobUrl, originalUrl, filename, isAttachment = false) {
+    if (!blobUrl && !isAttachment) {
+      // Fallback to downloading non-attachments by their URL.
+      if (!createValidAbsoluteUrl(originalUrl, "http://example.com")) {
+        throw new Error(`_triggerDownload - not a valid URL: ${originalUrl}`);
       }
-      let viewerUrl;
-      if (typeof PDFJSDev === "undefined" || PDFJSDev.test("GENERIC")) {
-        // The current URL is the viewer, let's use it and append the file.
-        viewerUrl = "?file=" + encodeURIComponent(blobUrl + "#" + filename);
-      } else if (PDFJSDev.test("CHROME")) {
-        // In the Chrome extension, the URL is rewritten using the history API
-        // in viewer.js, so an absolute URL must be generated.
-        viewerUrl =
-          // eslint-disable-next-line no-undef
-          chrome.runtime.getURL("/content/web/viewer.html") +
-          "?file=" +
-          encodeURIComponent(blobUrl + "#" + filename);
-      }
-
-      try {
-        window.open(viewerUrl);
-        return true;
-      } catch (ex) {
-        console.error(`openOrDownloadData: ${ex}`);
-        // Release the `blobUrl`, since opening it failed, and fallback to
-        // downloading the PDF file.
-        URL.revokeObjectURL(blobUrl);
-        this._openBlobUrls.delete(element);
-      }
+      blobUrl = originalUrl + "#pdfjs.action=download";
     }
 
-    this.downloadData(data, filename, contentType);
-    return false;
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.target = "_parent";
+    // Use a.download if available. This increases the likelihood that
+    // the file is downloaded instead of opened by another PDF plugin.
+    if ("download" in a) {
+      a.download = filename;
+    }
+    // <a> must be in the document for recent Firefox versions,
+    // otherwise .click() is ignored.
+    (document.body || document.documentElement).append(a);
+    a.click();
+    a.remove();
   }
 
-  /**
-   * @param sourceEventType {string} Used to signal what triggered the download.
-   *   The version of PDF.js integrated with Firefox uses this to to determine
-   *   which dialog to show. "save" triggers "save as" and "download" triggers
-   *   the "open with" dialog.
-   */
-  download(blob, url, filename, sourceEventType = "download") {
-    if (compatibilityParams.disableCreateObjectURL) {
-      // URL.createObjectURL is not supported
-      this.downloadUrl(url, filename);
-      return;
+  _getOpenDataUrl(blobUrl, filename, dest = null) {
+    if (typeof PDFJSDev !== "undefined" && PDFJSDev.test("COMPONENTS")) {
+      throw new Error("Opening data is not supported in `COMPONENTS` builds.");
     }
-    const blobUrl = URL.createObjectURL(blob);
-    download(blobUrl, filename);
+    // The current URL is the viewer, let's use it and append the file.
+    let url = "?file=" + encodeURIComponent(blobUrl + "#" + filename);
+    if (dest) {
+      url += `#${escape(dest)}`;
+    }
+    return url;
   }
 }
 

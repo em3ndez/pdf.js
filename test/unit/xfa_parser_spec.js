@@ -19,7 +19,7 @@ import {
   $getChildrenByClass,
   $getChildrenByName,
   $text,
-} from "../../src/core/xfa/xfa_object.js";
+} from "../../src/core/xfa/symbol_utils.js";
 import { Binder } from "../../src/core/xfa/bind.js";
 import { searchNode } from "../../src/core/xfa/som.js";
 import { XFAParser } from "../../src/core/xfa/parser.js";
@@ -46,7 +46,7 @@ describe("XFAParser", function () {
           forbidden
         </dynamicRender>
       </acrobat7>
-      <autoSave>enabled</autoSave>      
+      <autoSave>enabled</autoSave>
       <submitUrl>
                  http://d.e.f
       </submitUrl>
@@ -324,7 +324,7 @@ describe("XFAParser", function () {
       expect(font.weight).toEqual("bold");
       expect(font.posture).toEqual("italic");
       expect(font.fill.color.value).toEqual({ r: 1, g: 2, b: 3 });
-      expect(font.extras).toEqual(undefined);
+      expect(font.extras).toBeUndefined();
 
       font = root.template.subform.field[1].font;
       expect(font.typeface).toEqual("Foo");
@@ -374,7 +374,7 @@ describe("XFAParser", function () {
       expect(font.weight).toEqual("bold");
       expect(font.posture).toEqual("italic");
       expect(font.fill.color.value).toEqual({ r: 1, g: 2, b: 3 });
-      expect(font.extras).toEqual(undefined);
+      expect(font.extras).toBeUndefined();
 
       font = root.template.subform.field[1].font;
       expect(font.typeface).toEqual("Foo");
@@ -414,7 +414,7 @@ describe("XFAParser", function () {
         [
           " The first line of this paragraph is indented a half-inch.\n",
           " Successive lines are not indented.\n",
-          " This is the last line of the paragraph.\n \n",
+          " This is the last line of the paragraph.\n ",
         ].join("")
       );
     });
@@ -716,7 +716,7 @@ describe("XFAParser", function () {
       expect(found[$text]()).toBe("60.00");
 
       found = searchNode(root, units, "Total_Pric");
-      expect(found).toEqual(null);
+      expect(found).toBeNull();
     });
 
     it("should search some nodes in a datasets object using SOM", function () {
@@ -841,6 +841,67 @@ describe("XFAParser", function () {
       expect(searchNode(data, data, "A")[0][$dump]()).toEqual(expected);
     });
 
+    it("should make a basic binding and create a non-existing node with namespaceId equal to -1", function () {
+      const xml = `
+<?xml version="1.0"?>
+<xdp:xdp xmlns:xdp="http://ns.adobe.com/xdp/">
+  <template xmlns="http://www.xfa.org/schema/xfa-template/3.3">
+    <subform name="A">
+      <subform name="B">
+        <field name="C">
+        </field>
+        <field name="D">
+          <value>
+            <text>foobar</text>
+          </value>
+        </field>
+      </subform>
+    </subform>
+  </template>
+</xdp:xdp>
+      `;
+      const root = new XFAParser().parse(xml);
+      const binder = new Binder(root);
+      const form = binder.bind();
+      const data = binder.getData();
+
+      expect(
+        searchNode(form, form, "A.B.D.value.text")[0][$dump]().$content
+      ).toBe("foobar");
+
+      // Created nodes mustn't belong to xfa:datasets namespace.
+      const expected = {
+        $name: "A",
+        $ns: -1,
+        attributes: {},
+        children: [
+          {
+            $name: "B",
+            $ns: -1,
+            attributes: {},
+            children: [
+              {
+                $name: "C",
+                $ns: -1,
+                attributes: {},
+                children: [],
+              },
+              {
+                $name: "D",
+                $ns: -1,
+                attributes: {},
+                children: [],
+              },
+            ],
+          },
+        ],
+      };
+
+      expect(searchNode(data, data, "A")[0][$dump](/* hasNS */ true)).toEqual(
+        expected
+      );
+    });
+
     it("should make another basic binding", function () {
       const xml = `
 <?xml version="1.0"?>
@@ -882,7 +943,7 @@ describe("XFAParser", function () {
       ).toBe("Spratt");
       expect(
         searchNode(form, form, "registration.apt..text")[0][$dump]().$content
-      ).toBe(undefined);
+      ).toBeUndefined();
       expect(
         searchNode(form, form, "registration.street..text")[0][$dump]().$content
       ).toBe("99 Candlestick Lane");
@@ -942,7 +1003,7 @@ describe("XFAParser", function () {
       ).toBe("Spratt");
       expect(
         searchNode(form, form, "registration..apt..text")[0][$dump]().$content
-      ).toBe(undefined);
+      ).toBeUndefined();
       expect(
         searchNode(form, form, "registration..street..text")[0][$dump]()
           .$content
@@ -960,7 +1021,7 @@ describe("XFAParser", function () {
       ).toBe("SW1");
     });
 
-    it("should make basic binding with extra subform", function () {
+    it("should make basic binding with extra subform (consumeData)", function () {
       const xml = `
 <?xml version="1.0"?>
 <xdp:xdp xmlns:xdp="http://ns.adobe.com/xdp/">
@@ -1184,6 +1245,57 @@ describe("XFAParser", function () {
       `;
       const root = new XFAParser().parse(xml);
       const form = new Binder(root).bind();
+      expect(
+        searchNode(form, form, "subform.CardName.items[*].text[*]").map(x =>
+          x[$text]()
+        )
+      ).toEqual([
+        "Visa",
+        "Mastercard",
+        "American Express",
+        "VISA",
+        "MC",
+        "AMEX",
+      ]);
+    });
+
+    it("should make binding and bind items with a ref", function () {
+      const xml = `
+<?xml version="1.0"?>
+<xdp:xdp xmlns:xdp="http://ns.adobe.com/xdp/">
+  <template xmlns="http://www.xfa.org/schema/xfa-template/3.3">
+    <subform name="main">
+      <field name="CardName">
+        <bind match="dataRef" ref="$data.main.value"/>
+        <bindItems ref="$data.main.ccs.cc[*]" labelRef="uiname" valueRef="token"/>
+        <ui>
+          <choiceList/>
+        </ui>
+      </field>
+    </subform>
+  </template>
+  <xfa:datasets xmlns:xfa="http://www.xfa.org/schema/xfa-data/1.0/">
+    <xfa:data>
+      <main>
+        <value>VISA</value>
+        <ccs>
+          <cc uiname="Visa" token="VISA"/>
+          <cc uiname="Mastercard" token="MC"/>
+          <cc uiname="American Express" token="AMEX"/>
+        </ccs>
+        <CardName>MC</CardName>
+      </main>
+    </xfa:data>
+  </xfa:datasets>
+</xdp:xdp>
+      `;
+      const root = new XFAParser().parse(xml);
+      const form = new Binder(root).bind();
+      expect(
+        searchNode(form, form, "subform.CardName.value.text").map(x =>
+          x[$text]()
+        )
+      ).toEqual(["VISA"]);
       expect(
         searchNode(form, form, "subform.CardName.items[*].text[*]").map(x =>
           x[$text]()

@@ -13,21 +13,30 @@
  * limitations under the License.
  */
 
-import { assert, shadow, unreachable, warn } from "../shared/util.js";
-import { RefSetCache } from "./primitives.js";
+import {
+  assert,
+  FeatureTest,
+  makeSet,
+  unreachable,
+  warn,
+} from "../shared/util.js";
+import { RefMap, RefSet } from "./primitives.js";
 
 class BaseLocalCache {
   constructor(options) {
-    if (this.constructor === BaseLocalCache) {
+    if (
+      (typeof PDFJSDev === "undefined" || PDFJSDev.test("TESTING")) &&
+      this.constructor === BaseLocalCache
+    ) {
       unreachable("Cannot initialize BaseLocalCache.");
     }
-    this._onlyRefs = (options && options.onlyRefs) === true;
+    this._onlyRefs = options?.onlyRefs === true;
 
     if (!this._onlyRefs) {
       this._nameRefMap = new Map();
       this._imageMap = new Map();
     }
-    this._imageCache = new RefSetCache();
+    this._imageCache = new RefMap();
   }
 
   getByName(name) {
@@ -35,10 +44,7 @@ class BaseLocalCache {
       unreachable("Should not call `getByName` method.");
     }
     const ref = this._nameRefMap.get(name);
-    if (ref) {
-      return this.getByRef(ref);
-    }
-    return this._imageMap.get(name) || null;
+    return ref ? this.getByRef(ref) : this._imageMap.get(name) || null;
   }
 
   getByRef(ref) {
@@ -150,73 +156,160 @@ class LocalTilingPatternCache extends BaseLocalCache {
   }
 }
 
+class RegionalImageCache extends BaseLocalCache {
+  constructor(options) {
+    super({ onlyRefs: true });
+  }
+
+  set(name = null, ref, data) {
+    if (!ref) {
+      throw new Error('RegionalImageCache.set - expected "ref" argument.');
+    }
+    if (this._imageCache.has(ref)) {
+      return;
+    }
+    this._imageCache.put(ref, data);
+  }
+}
+
+class GlobalColorSpaceCache extends BaseLocalCache {
+  constructor(options) {
+    super({ onlyRefs: true });
+  }
+
+  set(name = null, ref, data) {
+    if (!ref) {
+      throw new Error('GlobalColorSpaceCache.set - expected "ref" argument.');
+    }
+    if (this._imageCache.has(ref)) {
+      return;
+    }
+    this._imageCache.put(ref, data);
+  }
+
+  clear() {
+    this._imageCache.clear();
+  }
+}
+
 class GlobalImageCache {
-  static get NUM_PAGES_THRESHOLD() {
-    return shadow(this, "NUM_PAGES_THRESHOLD", 2);
-  }
+  static NUM_PAGES_THRESHOLD = 2;
 
-  static get MIN_IMAGES_TO_CACHE() {
-    return shadow(this, "MIN_IMAGES_TO_CACHE", 10);
-  }
+  static MIN_IMAGES_TO_CACHE = 10;
 
-  static get MAX_BYTE_SIZE() {
-    return shadow(this, "MAX_BYTE_SIZE", /* Forty megabytes = */ 40e6);
-  }
+  static MAX_BYTE_SIZE = 5e7; // Fifty megabytes.
+
+  #decodeFailedSet = new RefSet();
+
+  // Page images kept as VideoFrames for global reuse.
+  #decodedImages = new RefMap();
 
   constructor() {
-    if (
-      typeof PDFJSDev === "undefined" ||
-      PDFJSDev.test("!PRODUCTION || TESTING")
-    ) {
+    if (typeof PDFJSDev === "undefined" || PDFJSDev.test("TESTING")) {
       assert(
         GlobalImageCache.NUM_PAGES_THRESHOLD > 1,
         "GlobalImageCache - invalid NUM_PAGES_THRESHOLD constant."
       );
     }
-    this._refCache = new RefSetCache();
-    this._imageCache = new RefSetCache();
+    this._refCache = new RefMap();
+    this._imageCache = new RefMap();
   }
 
-  get _byteSize() {
+  get #byteSize() {
     let byteSize = 0;
-    this._imageCache.forEach(imageData => {
+    for (const imageData of this._imageCache) {
       byteSize += imageData.byteSize;
-    });
+    }
     return byteSize;
   }
 
-  get _cacheLimitReached() {
-    if (this._imageCache.size < GlobalImageCache.MIN_IMAGES_TO_CACHE) {
-      return false;
-    }
-    if (this._byteSize < GlobalImageCache.MAX_BYTE_SIZE) {
-      return false;
-    }
-    return true;
+  get #cacheLimitReached() {
+    return (
+      this._imageCache.size >= GlobalImageCache.MIN_IMAGES_TO_CACHE &&
+      this.#byteSize >= GlobalImageCache.MAX_BYTE_SIZE
+    );
   }
 
   shouldCache(ref, pageIndex) {
-    const pageIndexSet = this._refCache.get(ref);
-    const numPages = pageIndexSet
-      ? pageIndexSet.size + (pageIndexSet.has(pageIndex) ? 0 : 1)
-      : 1;
+    const pageIndexSet = this._refCache.getOrPutComputed(ref, makeSet);
+    pageIndexSet.add(pageIndex);
 
-    if (numPages < GlobalImageCache.NUM_PAGES_THRESHOLD) {
+    if (pageIndexSet.size < GlobalImageCache.NUM_PAGES_THRESHOLD) {
       return false;
     }
-    if (!this._imageCache.has(ref) && this._cacheLimitReached) {
+    if (!this._imageCache.has(ref) && this.#cacheLimitReached) {
       return false;
     }
     return true;
   }
 
-  addPageIndex(ref, pageIndex) {
-    let pageIndexSet = this._refCache.get(ref);
-    if (!pageIndexSet) {
-      pageIndexSet = new Set();
-      this._refCache.put(ref, pageIndexSet);
+  addDecodeFailed(ref) {
+    this.#decodeFailedSet.put(ref);
+  }
+
+  hasDecodeFailed(ref) {
+    return this.#decodeFailedSet.has(ref);
+  }
+
+  /**
+   * Track the page before decoding so cleanup can discard the entry.
+   */
+  startDecodedImage(ref, pageProxyId) {
+    if (!FeatureTest.isVideoFrameSupported) {
+      return;
     }
-    pageIndexSet.add(pageIndex);
+    if (
+      (typeof PDFJSDev === "undefined" || !PDFJSDev.test("MOZCENTRAL")) &&
+      !FeatureTest.platform.isFirefox
+    ) {
+      return;
+    }
+    this.#decodedImages.get(ref)?.imgData?.bitmap.close();
+    this.#decodedImages.put(ref, { pageProxyId, imgData: null });
+  }
+
+  setDecodedImage(ref, imgData) {
+    const entry = this.#decodedImages.get(ref);
+    if (!entry || entry.imgData) {
+      return;
+    }
+    const { bitmap } = imgData;
+    try {
+      if (bitmap instanceof ImageBitmap) {
+        entry.imgData = {
+          ...imgData,
+          bitmap: new VideoFrame(bitmap, { timestamp: 0 }),
+        };
+      } else if (bitmap instanceof VideoFrame) {
+        entry.imgData = { ...imgData, bitmap: bitmap.clone() };
+      }
+    } catch (reason) {
+      warn(`GlobalImageCache.setDecodedImage - "${reason}".`);
+    }
+    if (!entry.imgData) {
+      this.#decodedImages.remove(ref);
+    }
+  }
+
+  /**
+   * @returns {object | null} The cached image, owned by the caller, or null.
+   */
+  takeDecodedImage(ref) {
+    const imgData = this.#decodedImages.get(ref)?.imgData;
+    if (!imgData) {
+      return null;
+    }
+    this.#decodedImages.remove(ref);
+    return imgData;
+  }
+
+  cleanupPage(pageProxyId) {
+    for (const [ref, entry] of this.#decodedImages.items()) {
+      if (entry.pageProxyId === pageProxyId) {
+        entry.imgData?.bitmap.close();
+        this.#decodedImages.remove(ref);
+      }
+    }
   }
 
   /**
@@ -235,10 +328,10 @@ class GlobalImageCache {
 
   getData(ref, pageIndex) {
     const pageIndexSet = this._refCache.get(ref);
-    if (!pageIndexSet) {
-      return null;
-    }
-    if (pageIndexSet.size < GlobalImageCache.NUM_PAGES_THRESHOLD) {
+    if (
+      !pageIndexSet ||
+      pageIndexSet.size < GlobalImageCache.NUM_PAGES_THRESHOLD
+    ) {
       return null;
     }
     const imageData = this._imageCache.get(ref);
@@ -254,13 +347,13 @@ class GlobalImageCache {
   setData(ref, data) {
     if (!this._refCache.has(ref)) {
       throw new Error(
-        'GlobalImageCache.setData - expected "addPageIndex" to have been called.'
+        'GlobalImageCache.setData - expected "shouldCache" to have been called.'
       );
     }
     if (this._imageCache.has(ref)) {
       return;
     }
-    if (this._cacheLimitReached) {
+    if (this.#cacheLimitReached) {
       warn("GlobalImageCache.setData - cache limit reached.");
       return;
     }
@@ -269,17 +362,25 @@ class GlobalImageCache {
 
   clear(onlyData = false) {
     if (!onlyData) {
+      this.#decodeFailedSet.clear();
       this._refCache.clear();
     }
     this._imageCache.clear();
+
+    for (const { imgData } of this.#decodedImages.values()) {
+      imgData?.bitmap.close();
+    }
+    this.#decodedImages.clear();
   }
 }
 
 export {
+  GlobalColorSpaceCache,
   GlobalImageCache,
   LocalColorSpaceCache,
   LocalFunctionCache,
   LocalGStateCache,
   LocalImageCache,
   LocalTilingPatternCache,
+  RegionalImageCache,
 };

@@ -13,78 +13,36 @@
  * limitations under the License.
  */
 
-import { assert } from "../shared/util.js";
+import {
+  BasePDFStream,
+  BasePDFStreamRangeReader,
+  BasePDFStreamReader,
+} from "../shared/base_pdf_stream.js";
+import { noopFn } from "../shared/util.js";
 
-/** @implements {IPDFStream} */
-class PDFWorkerStream {
-  constructor(msgHandler) {
-    this._msgHandler = msgHandler;
-    this._contentLength = null;
-    this._fullRequestReader = null;
-    this._rangeRequestReaders = [];
-  }
-
-  getFullReader() {
-    assert(
-      !this._fullRequestReader,
-      "PDFWorkerStream.getFullReader can only be called once."
-    );
-    this._fullRequestReader = new PDFWorkerStreamReader(this._msgHandler);
-    return this._fullRequestReader;
-  }
-
-  getRangeReader(begin, end) {
-    const reader = new PDFWorkerStreamRangeReader(begin, end, this._msgHandler);
-    this._rangeRequestReaders.push(reader);
-    return reader;
-  }
-
-  cancelAllRequests(reason) {
-    if (this._fullRequestReader) {
-      this._fullRequestReader.cancel(reason);
-    }
-    for (const reader of this._rangeRequestReaders.slice(0)) {
-      reader.cancel(reason);
-    }
+class PDFWorkerStream extends BasePDFStream {
+  constructor(source) {
+    super(source, PDFWorkerStreamReader, PDFWorkerStreamRangeReader);
   }
 }
 
-/** @implements {IPDFStreamReader} */
-class PDFWorkerStreamReader {
-  constructor(msgHandler) {
-    this._msgHandler = msgHandler;
-    this.onProgress = null;
+class PDFWorkerStreamReader extends BasePDFStreamReader {
+  _reader = null;
 
-    this._contentLength = null;
-    this._isRangeSupported = false;
-    this._isStreamingSupported = false;
+  constructor(stream) {
+    super(stream);
+    const { msgHandler } = stream._source;
 
-    const readableStream = this._msgHandler.sendWithStream("GetReader");
+    const readableStream = msgHandler.sendWithStream("GetReader");
     this._reader = readableStream.getReader();
 
-    this._headersReady = this._msgHandler
-      .sendWithPromise("ReaderHeadersReady")
-      .then(data => {
-        this._isStreamingSupported = data.isStreamingSupported;
-        this._isRangeSupported = data.isRangeSupported;
-        this._contentLength = data.contentLength;
-      });
-  }
+    msgHandler.sendWithPromise("ReaderHeadersReady").then(data => {
+      this._contentLength = data.contentLength;
+      this._isStreamingSupported = data.isStreamingSupported;
+      this._isRangeSupported = data.isRangeSupported;
 
-  get headersReady() {
-    return this._headersReady;
-  }
-
-  get contentLength() {
-    return this._contentLength;
-  }
-
-  get isStreamingSupported() {
-    return this._isStreamingSupported;
-  }
-
-  get isRangeSupported() {
-    return this._isRangeSupported;
+      this._headersCapability.resolve();
+    }, this._headersCapability.reject);
   }
 
   async read() {
@@ -98,37 +56,33 @@ class PDFWorkerStreamReader {
   }
 
   cancel(reason) {
-    this._reader.cancel(reason);
+    this._reader.cancel(reason).catch(noopFn);
   }
 }
 
-/** @implements {IPDFStreamRangeReader} */
-class PDFWorkerStreamRangeReader {
-  constructor(begin, end, msgHandler) {
-    this._msgHandler = msgHandler;
-    this.onProgress = null;
+class PDFWorkerStreamRangeReader extends BasePDFStreamRangeReader {
+  _reader = null;
 
-    const readableStream = this._msgHandler.sendWithStream("GetRangeReader", {
+  constructor(stream, begin, end) {
+    super(stream, begin, end);
+    const { msgHandler } = stream._source;
+
+    const readableStream = msgHandler.sendWithStream("GetRangeReader", {
       begin,
       end,
     });
     this._reader = readableStream.getReader();
   }
 
-  get isStreamingSupported() {
-    return false;
-  }
-
   async read() {
     const { value, done } = await this._reader.read();
-    if (done) {
-      return { value: undefined, done: true };
-    }
-    return { value: value.buffer, done: false };
+    return done
+      ? { value: undefined, done: true }
+      : { value: value.buffer, done: false };
   }
 
   cancel(reason) {
-    this._reader.cancel(reason);
+    this._reader.cancel(reason).catch(noopFn);
   }
 }
 

@@ -36,12 +36,12 @@ class MetadataParser {
     // Start by removing any "junk" before the first tag (see issue 10395).
     return data
       .replace(/^[^<]+/, "")
-      .replace(/>\\376\\377([^<]+)/g, function (all, codes) {
+      .replaceAll(/>\\376\\377([^<]+)/g, function (all, codes) {
         const bytes = codes
-          .replace(/\\([0-3])([0-7])([0-7])/g, function (code, d1, d2, d3) {
-            return String.fromCharCode(d1 * 64 + d2 * 8 + d3 * 1);
-          })
-          .replace(/&(amp|apos|gt|lt|quot);/g, function (str, name) {
+          .replaceAll(/\\([0-3])([0-7])([0-7])/g, (_, d1, d2, d3) =>
+            String.fromCharCode(d1 * 64 + d2 * 8 + d3 * 1)
+          )
+          .replaceAll(/&(amp|apos|gt|lt|quot);/g, function (str, name) {
             switch (name) {
               case "amp":
                 return "&";
@@ -57,7 +57,7 @@ class MetadataParser {
             throw new Error(`_repair: ${name} isn't defined.`);
           });
 
-        const charBuf = [];
+        const charBuf = [">"];
         for (let i = 0, ii = bytes.length; i < ii; i += 2) {
           const code = bytes.charCodeAt(i) * 256 + bytes.charCodeAt(i + 1);
           if (
@@ -74,16 +74,15 @@ class MetadataParser {
             );
           }
         }
-        return ">" + charBuf.join("");
+        return charBuf.join("");
       });
   }
 
   _getSequence(entry) {
     const name = entry.nodeName;
-    if (name !== "rdf:bag" && name !== "rdf:seq" && name !== "rdf:alt") {
-      return null;
-    }
-    return entry.childNodes.filter(node => node.nodeName === "rdf:li");
+    return name !== "rdf:bag" && name !== "rdf:seq" && name !== "rdf:alt"
+      ? null
+      : entry.childNodes.filter(node => node.nodeName === "rdf:li");
   }
 
   _parseArray(entry) {

@@ -13,8 +13,14 @@
  * limitations under the License.
  */
 
+import { internalOpt } from "./internal_evt.js";
+
+/** @typedef {import("./event_utils").EventBus} EventBus */
+// eslint-disable-next-line max-len
+/** @typedef {import("./pdf_find_controller").PDFFindController} PDFFindController */
+
 /**
- * @typedef {Object} TextHighlighterOptions
+ * @typedef {object} TextHighlighterOptions
  * @property {PDFFindController} findController
  * @property {EventBus} eventBus - The application event bus.
  * @property {number} pageIndex - The page index.
@@ -25,6 +31,8 @@
  * either the text layer or XFA layer depending on the type of document.
  */
 class TextHighlighter {
+  #eventAC = null;
+
   /**
    * @param {TextHighlighterOptions} options
    */
@@ -33,7 +41,6 @@ class TextHighlighter {
     this.matches = [];
     this.eventBus = eventBus;
     this.pageIdx = pageIndex;
-    this._onUpdateTextLayerMatches = null;
     this.textDivs = null;
     this.textContentItemsStr = null;
     this.enabled = false;
@@ -44,7 +51,6 @@ class TextHighlighter {
    * The arrays should be of equal length and the array element at each index
    * should correspond to the other. e.g.
    * `items[0] = "<span>Item 0</span>" and texts[0] = "Item 0";
-   *
    * @param {Array<Node>} divs
    * @param {Array<string>} texts
    */
@@ -65,15 +71,18 @@ class TextHighlighter {
       throw new Error("TextHighlighter is already enabled.");
     }
     this.enabled = true;
-    if (!this._onUpdateTextLayerMatches) {
-      this._onUpdateTextLayerMatches = evt => {
-        if (evt.pageIndex === this.pageIdx || evt.pageIndex === -1) {
-          this._updateMatches();
-        }
-      };
-      this.eventBus._on(
+
+    if (!this.#eventAC) {
+      this.#eventAC = new AbortController();
+
+      this.eventBus.on(
         "updatetextlayermatches",
-        this._onUpdateTextLayerMatches
+        evt => {
+          if (evt.pageIndex === this.pageIdx || evt.pageIndex === -1) {
+            this._updateMatches();
+          }
+        },
+        { signal: this.#eventAC.signal, ...internalOpt }
       );
     }
     this._updateMatches();
@@ -84,13 +93,11 @@ class TextHighlighter {
       return;
     }
     this.enabled = false;
-    if (this._onUpdateTextLayerMatches) {
-      this.eventBus._off(
-        "updatetextlayermatches",
-        this._onUpdateTextLayerMatches
-      );
-      this._onUpdateTextLayerMatches = null;
-    }
+
+    this.#eventAC?.abort();
+    this.#eventAC = null;
+
+    this._updateMatches(/* reset = */ true);
   }
 
   _convertMatches(matches, matchesLength) {
@@ -172,8 +179,8 @@ class TextHighlighter {
       let div = textDivs[divIdx];
       if (div.nodeType === Node.TEXT_NODE) {
         const span = document.createElement("span");
-        div.parentNode.insertBefore(span, div);
-        span.appendChild(div);
+        div.before(span);
+        span.append(div);
         textDivs[divIdx] = span;
         div = span;
       }
@@ -185,11 +192,13 @@ class TextHighlighter {
       if (className) {
         const span = document.createElement("span");
         span.className = `${className} appended`;
-        span.appendChild(node);
-        div.appendChild(span);
-        return className.includes("selected") ? span.offsetLeft : 0;
+        span.append(node);
+        div.append(span);
+
+        return className.includes("selected") ? span : null;
       }
-      div.appendChild(node);
+
+      div.append(node);
       return 0;
     }
 
@@ -203,13 +212,24 @@ class TextHighlighter {
       return;
     }
 
+    let lastDivIdx = -1;
+    let lastOffset = -1;
     for (let i = i0; i < i1; i++) {
       const match = matches[i];
       const begin = match.begin;
+      if (begin.divIdx === lastDivIdx && begin.offset === lastOffset) {
+        // It's possible to be in this situation if we searched for a 'f' and we
+        // have a ligature 'ff' in the text. The 'ff' has to be highlighted two
+        // times.
+        continue;
+      }
+      lastDivIdx = begin.divIdx;
+      lastOffset = begin.offset;
+
       const end = match.end;
       const isSelected = isSelectedPage && i === selectedMatchIdx;
       const highlightSuffix = isSelected ? " selected" : "";
-      let selectedLeft = 0;
+      let selectedSpan = null;
 
       // Match inside new div.
       if (!prevEnd || begin.divIdx !== prevEnd.divIdx) {
@@ -224,14 +244,14 @@ class TextHighlighter {
       }
 
       if (begin.divIdx === end.divIdx) {
-        selectedLeft = appendTextToDiv(
+        selectedSpan = appendTextToDiv(
           begin.divIdx,
           begin.offset,
           end.offset,
           "highlight" + highlightSuffix
         );
       } else {
-        selectedLeft = appendTextToDiv(
+        selectedSpan = appendTextToDiv(
           begin.divIdx,
           begin.offset,
           infinity.offset,
@@ -247,8 +267,7 @@ class TextHighlighter {
       if (isSelected) {
         // Attempt to scroll the selected match into view.
         findController.scrollMatchIntoView({
-          element: textDivs[begin.divIdx],
-          selectedLeft,
+          element: selectedSpan,
           pageIndex: pageIdx,
           matchIndex: selectedMatchIdx,
         });
@@ -260,8 +279,8 @@ class TextHighlighter {
     }
   }
 
-  _updateMatches() {
-    if (!this.enabled) {
+  _updateMatches(reset = false) {
+    if (!this.enabled && !reset) {
       return;
     }
     const { findController, matches, pageIdx } = this;
@@ -269,8 +288,7 @@ class TextHighlighter {
     let clearedUntilDivIdx = -1;
 
     // Clear all current matches.
-    for (let i = 0, ii = matches.length; i < ii; i++) {
-      const match = matches[i];
+    for (const match of matches) {
       const begin = Math.max(clearedUntilDivIdx, match.begin.divIdx);
       for (let n = begin, end = match.end.divIdx; n <= end; n++) {
         const div = textDivs[n];
@@ -280,7 +298,7 @@ class TextHighlighter {
       clearedUntilDivIdx = match.end.divIdx + 1;
     }
 
-    if (!findController?.highlightMatches) {
+    if (!findController?.highlightMatches || reset) {
       return;
     }
     // Convert the matches on the `findController` into the match format

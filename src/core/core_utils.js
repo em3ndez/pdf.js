@@ -14,37 +14,47 @@
  */
 
 import {
+  AnnotationEditorPrefix,
   assert,
   BaseException,
-  objectSize,
-  stringToPDFString,
+  makeArr,
+  Util,
   warn,
 } from "../shared/util.js";
-import { Dict, isName, isRef, isStream, RefSet } from "./primitives.js";
+import { Dict, isName, isRefsEqual, Name, Ref, RefSet } from "./primitives.js";
+import { BaseStream } from "./base_stream.js";
+import { CONTROL_CHAR_REGEXP } from "../shared/css_utils.js";
+import { stringToPDFString } from "./string_utils.js";
 
-function getLookupTableFactory(initializer) {
+const PDF_VERSION_REGEXP = /^[1-9]\.\d$/;
+const MAX_INT_32 = 2 ** 31 - 1;
+
+const IDENTITY_MATRIX = [1, 0, 0, 1, 0, 0];
+
+const RESOURCES_KEYS_OPERATOR_LIST = [
+  "ColorSpace",
+  "ExtGState",
+  "Font",
+  "Pattern",
+  "Properties",
+  "Shading",
+  "XObject",
+];
+
+const RESOURCES_KEYS_TEXT_CONTENT = [
+  "ExtGState",
+  "Font",
+  "Properties",
+  "XObject",
+];
+
+function getLookupTableFactory(initializer, useArray = false) {
   let lookup;
   return function () {
     if (initializer) {
-      lookup = Object.create(null);
+      lookup = useArray ? [] : Object.create(null);
       initializer(lookup);
       initializer = null;
-    }
-    return lookup;
-  };
-}
-
-function getArrayLookupTableFactory(initializer) {
-  let lookup;
-  return function () {
-    if (initializer) {
-      let arr = initializer();
-      initializer = null;
-      lookup = Object.create(null);
-      for (let i = 0, ii = arr.length; i < ii; i += 2) {
-        lookup[arr[i]] = arr[i + 1];
-      }
-      arr = null;
     }
     return lookup;
   };
@@ -77,6 +87,41 @@ class XRefParseException extends BaseException {
 }
 
 /**
+ * Combines multiple ArrayBuffers into a single Uint8Array.
+ * @param {Array<ArrayBuffer>} arr - An array of ArrayBuffers.
+ * @returns {Uint8Array}
+ */
+function arrayBuffersToBytes(arr) {
+  if (typeof PDFJSDev === "undefined" || PDFJSDev.test("TESTING")) {
+    for (const item of arr) {
+      assert(
+        item instanceof ArrayBuffer,
+        "arrayBuffersToBytes - expected an ArrayBuffer."
+      );
+    }
+  }
+  const length = arr.length;
+  if (length === 0) {
+    return new Uint8Array(0);
+  }
+  if (length === 1) {
+    return new Uint8Array(arr[0]);
+  }
+  let dataLength = 0;
+  for (let i = 0; i < length; i++) {
+    dataLength += arr[i].byteLength;
+  }
+  const data = new Uint8Array(dataLength);
+  let pos = 0;
+  for (let i = 0; i < length; i++) {
+    const item = new Uint8Array(arr[i]);
+    data.set(item, pos);
+    pos += item.byteLength;
+  }
+  return data;
+}
+
+/**
  * Get the value of an inheritable property.
  *
  * If the PDF specification explicitly lists a property in a dictionary as
@@ -86,15 +131,15 @@ class XRefParseException extends BaseException {
  * If the key is not found in the tree, `undefined` is returned. Otherwise,
  * the value for the key is returned or, if `stopWhenFound` is `false`, a list
  * of values is returned.
- *
- * @param {Dict} dict - Dictionary from where to start the traversal.
- * @param {string} key - The key of the property to find the value for.
- * @param {boolean} getArray - Whether or not the value should be fetched as an
- *   array. The default value is `false`.
- * @param {boolean} stopWhenFound - Whether or not to stop the traversal when
- *   the key is found. If set to `false`, we always walk up the entire parent
- *   chain, for example to be able to find `\Resources` placed on multiple
- *   levels of the tree. The default value is `true`.
+ * @param {object} params
+ * @param {Dict} params.dict - Dictionary from where to start the traversal.
+ * @param {string} params.key - The key of the property to find the value for.
+ * @param {boolean} params.getArray - Whether or not the value should be fetched
+ *   as an array. The default value is `false`.
+ * @param {boolean} params.stopWhenFound - Whether or not to stop the traversal
+ *   when the key is found. If set to `false`, we always walk up the entire
+ *   parent chain, for example to be able to find `\Resources` placed on
+ *   multiple levels of the tree. The default value is `true`.
  */
 function getInheritableProperty({
   dict,
@@ -114,14 +159,79 @@ function getInheritableProperty({
       if (stopWhenFound) {
         return value;
       }
-      if (!values) {
-        values = [];
-      }
-      values.push(value);
+      (values ||= []).push(value);
     }
     dict = dict.get("Parent");
   }
   return values;
+}
+
+/**
+ * Get the parent dictionary to update when a property is set.
+ * @param {Dict} dict - Dictionary from where to start the traversal.
+ * @param {Ref} ref - The reference to the dictionary.
+ * @param {XRef} xref - The `XRef` instance.
+ */
+function getParentToUpdate(dict, ref, xref) {
+  const visited = new RefSet();
+  const firstDict = dict;
+  const result = { dict: null, ref: null };
+
+  while (dict instanceof Dict && !visited.has(ref)) {
+    visited.put(ref);
+    if (dict.has("T")) {
+      break;
+    }
+    ref = dict.getRaw("Parent");
+    if (!(ref instanceof Ref)) {
+      return result;
+    }
+    dict = xref.fetch(ref);
+  }
+  if (dict instanceof Dict && dict !== firstDict) {
+    result.dict = dict;
+    result.ref = ref;
+  }
+  return result;
+}
+
+function deepCompare(a, b) {
+  if (a === b) {
+    return true;
+  }
+  if (a instanceof Ref && b instanceof Ref) {
+    return isRefsEqual(a, b);
+  }
+  if (a instanceof Name && b instanceof Name) {
+    return a.name === b.name;
+  }
+
+  if (a instanceof Dict && b instanceof Dict) {
+    if (a.size !== b.size) {
+      return false;
+    }
+    for (const [key, value1] of a.getRawEntries()) {
+      const value2 = b.getRaw(key);
+      if (value2 === undefined || !deepCompare(value1, value2)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) {
+      return false;
+    }
+    for (let i = 0, ii = a.length; i < ii; i++) {
+      if (!deepCompare(a[i], b[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  return false;
 }
 
 // prettier-ignore
@@ -143,54 +253,13 @@ function toRomanNumerals(number, lowerCase = false) {
     Number.isInteger(number) && number > 0,
     "The number should be a positive integer."
   );
-  const romanBuf = [];
-  let pos;
-  // Thousands
-  while (number >= 1000) {
-    number -= 1000;
-    romanBuf.push("M");
-  }
-  // Hundreds
-  pos = (number / 100) | 0;
-  number %= 100;
-  romanBuf.push(ROMAN_NUMBER_MAP[pos]);
-  // Tens
-  pos = (number / 10) | 0;
-  number %= 10;
-  romanBuf.push(ROMAN_NUMBER_MAP[10 + pos]);
-  // Ones
-  romanBuf.push(ROMAN_NUMBER_MAP[20 + number]); // eslint-disable-line unicorn/no-array-push-push
 
-  const romanStr = romanBuf.join("");
-  return lowerCase ? romanStr.toLowerCase() : romanStr;
-}
-
-// Calculate the base 2 logarithm of the number `x`. This differs from the
-// native function in the sense that it returns the ceiling value and that it
-// returns 0 instead of `Infinity`/`NaN` for `x` values smaller than/equal to 0.
-function log2(x) {
-  if (x <= 0) {
-    return 0;
-  }
-  return Math.ceil(Math.log2(x));
-}
-
-function readInt8(data, offset) {
-  return (data[offset] << 24) >> 24;
-}
-
-function readUint16(data, offset) {
-  return (data[offset] << 8) | data[offset + 1];
-}
-
-function readUint32(data, offset) {
-  return (
-    ((data[offset] << 24) |
-      (data[offset + 1] << 16) |
-      (data[offset + 2] << 8) |
-      data[offset + 3]) >>>
-    0
-  );
+  const roman =
+    "M".repeat((number / 1000) | 0) +
+    ROMAN_NUMBER_MAP[((number % 1000) / 100) | 0] +
+    ROMAN_NUMBER_MAP[10 + (((number % 100) / 10) | 0)] +
+    ROMAN_NUMBER_MAP[20 + (number % 10)];
+  return lowerCase ? roman.toLowerCase() : roman;
 }
 
 // Checks if ch is one of the following characters: SPACE, TAB, CR or LF.
@@ -199,22 +268,75 @@ function isWhiteSpace(ch) {
 }
 
 /**
+ * Checks if something is an Array containing only boolean values,
+ * and (optionally) checks its length.
+ * @param {any} arr
+ * @param {number | null} len
+ * @returns {boolean}
+ */
+function isBooleanArray(arr, len) {
+  return (
+    Array.isArray(arr) &&
+    (len === null || arr.length === len) &&
+    arr.every(x => typeof x === "boolean")
+  );
+}
+
+/**
+ * Checks if something is an Array containing only numbers,
+ * and (optionally) checks its length.
+ * @param {any} arr
+ * @param {number | null} len
+ * @returns {boolean}
+ */
+function isNumberArray(arr, len) {
+  if (Array.isArray(arr)) {
+    return (
+      (len === null || arr.length === len) &&
+      arr.every(x => typeof x === "number")
+    );
+  }
+
+  // This check allows us to have typed arrays but not the
+  // BigInt64Array/BigUint64Array types (their elements aren't "number").
+  return (
+    ArrayBuffer.isView(arr) &&
+    !(arr instanceof BigInt64Array || arr instanceof BigUint64Array) &&
+    (len === null || arr.length === len)
+  );
+}
+
+// Returns the matrix, or the fallback value if it's invalid.
+function lookupMatrix(arr, fallback) {
+  return isNumberArray(arr, 6) ? arr : fallback;
+}
+
+// Returns the rectangle, or the fallback value if it's invalid.
+function lookupRect(arr, fallback) {
+  return isNumberArray(arr, 4) ? arr : fallback;
+}
+
+// Returns the normalized rectangle, or the fallback value if it's invalid.
+function lookupNormalRect(arr, fallback) {
+  return isNumberArray(arr, 4) ? Util.normalizeRect(arr) : fallback;
+}
+
+/**
  * AcroForm field names use an array like notation to refer to
  * repeated XFA elements e.g. foo.bar[nnn].
  * see: XFA Spec Chapter 3 - Repeated Elements
- *
  * @param {string} path - XFA path name.
  * @returns {Array} - Array of Objects with the name and pos of
  * each part of the path.
  */
 function parseXFAPath(path) {
-  const positionPattern = /(.+)\[([0-9]+)\]$/;
+  // Anchoring prevents retrying the match at every character.
+  const positionPattern = /^(.+)\[(\d+)\]$/;
   return path.split(".").map(component => {
     const m = component.match(positionPattern);
-    if (m) {
-      return { name: m[1], pos: parseInt(m[2], 10) };
-    }
-    return { name: component, pos: 0 };
+    return m
+      ? { name: m[1], pos: parseInt(m[2], 10) }
+      : { name: component, pos: 0 };
   });
 }
 
@@ -242,7 +364,7 @@ function escapePDFName(str) {
       if (start < i) {
         buffer.push(str.substring(start, i));
       }
-      buffer.push(`#${char.toString(16)}`);
+      buffer.push(`#${char.toString(16).padStart(2, "0")}`);
       start = i + 1;
     }
   }
@@ -252,10 +374,23 @@ function escapePDFName(str) {
   }
 
   if (start < str.length) {
-    buffer.push(str.substring(start, str.length));
+    buffer.push(str.substring(start));
   }
 
   return buffer.join("");
+}
+
+// Replace "(", ")", "\n", "\r" and "\" by "\(", "\)", "\\n", "\\r" and "\\"
+// in order to write it in a PDF file.
+function escapeString(str) {
+  return str.replaceAll(/([()\\\n\r])/g, match => {
+    if (match === "\n") {
+      return "\\n";
+    } else if (match === "\r") {
+      return "\\r";
+    }
+    return `\\${match}`;
+  });
 }
 
 function _collectJS(entry, xref, list, parents) {
@@ -264,7 +399,7 @@ function _collectJS(entry, xref, list, parents) {
   }
 
   let parent = null;
-  if (isRef(entry)) {
+  if (entry instanceof Ref) {
     if (parents.has(entry)) {
       // If we've already found entry then we've a cycle.
       return;
@@ -278,17 +413,20 @@ function _collectJS(entry, xref, list, parents) {
       _collectJS(element, xref, list, parents);
     }
   } else if (entry instanceof Dict) {
-    if (isName(entry.get("S"), "JavaScript") && entry.has("JS")) {
+    if (isName(entry.get("S"), "JavaScript")) {
       const js = entry.get("JS");
       let code;
-      if (isStream(js)) {
+      if (js instanceof BaseStream) {
         code = js.getString();
-      } else {
+      } else if (typeof js === "string") {
         code = js;
       }
-      code = stringToPDFString(code);
+      code &&= stringToPDFString(
+        code,
+        /* keepEscapeSequence = */ true
+      ).replaceAll("\x00", "");
       if (code) {
-        list.push(code);
+        list.push(code.trim());
       }
     }
     _collectJS(entry.getRaw("Next"), xref, list, parents);
@@ -299,8 +437,16 @@ function _collectJS(entry, xref, list, parents) {
   }
 }
 
+function _collectAction(dict, name, xref, actions) {
+  const list = [];
+  _collectJS(dict, xref, list, new RefSet());
+  if (list.length) {
+    actions.set(name, list);
+  }
+}
+
 function collectActions(xref, dict, eventType) {
-  const actions = Object.create(null);
+  const actions = new Map();
   const additionalActionsDicts = getInheritableProperty({
     dict,
     key: "AA",
@@ -317,32 +463,19 @@ function collectActions(xref, dict, eventType) {
       if (!(additionalActions instanceof Dict)) {
         continue;
       }
-      for (const key of additionalActions.getKeys()) {
+      for (const [key, rawActionDict] of additionalActions.getRawEntries()) {
         const action = eventType[key];
-        if (!action) {
-          continue;
-        }
-        const actionDict = additionalActions.getRaw(key);
-        const parents = new RefSet();
-        const list = [];
-        _collectJS(actionDict, xref, list, parents);
-        if (list.length > 0) {
-          actions[action] = list;
+        if (action) {
+          _collectAction(rawActionDict, action, xref, actions);
         }
       }
     }
   }
   // Collect the Action if any (we may have one on pushbutton).
   if (dict.has("A")) {
-    const actionDict = dict.get("A");
-    const parents = new RefSet();
-    const list = [];
-    _collectJS(actionDict, xref, list, parents);
-    if (list.length > 0) {
-      actions.Action = list;
-    }
+    _collectAction(dict.get("A"), "Action", xref, actions);
   }
-  return objectSize(actions) > 0 ? actions : null;
+  return actions.size ? actions : null;
 }
 
 const XMLEntities = {
@@ -352,6 +485,17 @@ const XMLEntities = {
   /* " */ 0x22: "&quot;",
   /* ' */ 0x27: "&apos;",
 };
+
+function* codePointIter(str) {
+  for (let i = 0, ii = str.length; i < ii; i++) {
+    const char = str.codePointAt(i);
+    if (char > 0xd7ff && (char < 0xe000 || char > 0xfffd)) {
+      // char is represented by two u16
+      i++;
+    }
+    yield char;
+  }
+}
 
 function encodeToXmlString(str) {
   const buffer = [];
@@ -373,7 +517,7 @@ function encodeToXmlString(str) {
         buffer.push(str.substring(start, i));
       }
       buffer.push(`&#x${char.toString(16).toUpperCase()};`);
-      if (char > 0xd7ff && (char < 0xe000 || char > 0xfffd)) {
+      if (char > 0xffff) {
         // char is represented by two u16
         i++;
       }
@@ -385,9 +529,57 @@ function encodeToXmlString(str) {
     return str;
   }
   if (start < str.length) {
-    buffer.push(str.substring(start, str.length));
+    buffer.push(str.substring(start));
   }
   return buffer.join("");
+}
+
+function validateFontName(fontFamily, mustWarn = false) {
+  // See https://developer.mozilla.org/en-US/docs/Web/CSS/string.
+  const m = /^("|').*("|')$/.exec(fontFamily);
+  if (m && m[1] === m[2]) {
+    const re = new RegExp(`[^\\\\]${m[1]}`);
+    if (re.test(fontFamily.slice(1, -1))) {
+      if (mustWarn) {
+        warn(`FontFamily contains unescaped ${m[1]}: ${fontFamily}.`);
+      }
+      return false;
+    }
+    // A <string> is terminated by a newline, which for CSS also includes the
+    // form feed character; see https://drafts.csswg.org/css-syntax/#newline.
+    // The font family is escaped before being used, see `serializeFontFamily`,
+    // hence this only prevents values that cannot sensibly name a font from
+    // being used at all (the unquoted case below is already this strict).
+    if (CONTROL_CHAR_REGEXP.test(fontFamily)) {
+      if (mustWarn) {
+        warn(`FontFamily contains control characters: ${fontFamily}.`);
+      }
+      return false;
+    }
+  } else {
+    // See https://developer.mozilla.org/en-US/docs/Web/CSS/custom-ident.
+    for (const ident of fontFamily.split(/[ \t]+/)) {
+      if (/^(?:\d|-[\d-])/.test(ident) || !/^[\w\\-]+$/.test(ident)) {
+        if (mustWarn) {
+          warn(`FontFamily contains invalid <custom-ident>: ${fontFamily}.`);
+        }
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+// Strip the spaces preceding a digit, since e.g. "Wingdings 3" is not a valid
+// font name in the css specs.
+// The optional trailing digit is matched as part of the space run, so that a
+// failing match cannot backtrack over the spaces; otherwise the replacement
+// would be quadratic in the number of consecutive spaces.
+function normalizeCSSFontFamily(fontFamily) {
+  return fontFamily.replaceAll(
+    /( +)(\d)?/g,
+    (_, spaces, digit) => digit ?? " "
+  );
 }
 
 function validateCSSFont(cssFontInfo) {
@@ -414,30 +606,8 @@ function validateCSSFont(cssFontInfo) {
 
   const { fontFamily, fontWeight, italicAngle } = cssFontInfo;
 
-  // See https://developer.mozilla.org/en-US/docs/Web/CSS/string.
-  if (/^".*"$/.test(fontFamily)) {
-    if (/[^\\]"/.test(fontFamily.slice(1, fontFamily.length - 1))) {
-      warn(`XFA - FontFamily contains some unescaped ": ${fontFamily}.`);
-      return false;
-    }
-  } else if (/^'.*'$/.test(fontFamily)) {
-    if (/[^\\]'/.test(fontFamily.slice(1, fontFamily.length - 1))) {
-      warn(`XFA - FontFamily contains some unescaped ': ${fontFamily}.`);
-      return false;
-    }
-  } else {
-    // See https://developer.mozilla.org/en-US/docs/Web/CSS/custom-ident.
-    for (const ident of fontFamily.split(/[ \t]+/)) {
-      if (
-        /^([0-9]|(-([0-9]|-)))/.test(ident) ||
-        !/^[a-zA-Z0-9\-_\\]+$/.test(ident)
-      ) {
-        warn(
-          `XFA - FontFamily contains some invalid <custom-ident>: ${fontFamily}.`
-        );
-        return false;
-      }
-    }
+  if (!validateFontName(fontFamily, true)) {
+    return false;
   }
 
   const weight = fontWeight ? fontWeight.toString() : "";
@@ -454,23 +624,183 @@ function validateCSSFont(cssFontInfo) {
   return true;
 }
 
+function recoverJsURL(str) {
+  // Attempt to recover valid URLs from `JS` entries with certain
+  // white-listed formats:
+  //  - window.open('http://example.com')
+  //  - app.launchURL('http://example.com', true)
+  //  - xfa.host.gotoURL('http://example.com')
+  const URL_OPEN_METHODS = ["app.launchURL", "window.open", "xfa.host.gotoURL"];
+  const regex = new RegExp(
+    "^\\s*(" +
+      URL_OPEN_METHODS.join("|").replaceAll(".", "\\.") +
+      ")\\((?:'|\")([^'\"]*)(?:'|\")(?:,\\s*(\\w+)\\)|\\))",
+    "i"
+  );
+
+  const jsUrl = regex.exec(str);
+  if (jsUrl?.[2]) {
+    return {
+      url: jsUrl[2],
+      newWindow: jsUrl[1] === "app.launchURL" && jsUrl[3] === "true",
+    };
+  }
+
+  return null;
+}
+
+function numberToString(value) {
+  if (typeof PDFJSDev === "undefined" || PDFJSDev.test("TESTING")) {
+    assert(
+      typeof value === "number",
+      `numberToString - the value (${value}) should be a number.`
+    );
+  }
+
+  if (Number.isInteger(value)) {
+    return value.toString();
+  }
+
+  const roundedValue = Math.round(value * 100);
+  if (roundedValue % 100 === 0) {
+    return (roundedValue / 100).toString();
+  }
+
+  return roundedValue % 10 === 0 ? value.toFixed(1) : value.toFixed(2);
+}
+
+function getNewAnnotationsMap(annotationStorage) {
+  if (!annotationStorage) {
+    return null;
+  }
+  const newAnnotationsByPage = new Map();
+  // The concept of page in a XFA is very different, so
+  // editing is just not implemented.
+  for (const [key, value] of annotationStorage) {
+    if (!key.startsWith(AnnotationEditorPrefix)) {
+      continue;
+    }
+    newAnnotationsByPage
+      .getOrInsertComputed(value.pageIndex, makeArr)
+      .push(value);
+  }
+  return newAnnotationsByPage.size > 0 ? newAnnotationsByPage : null;
+}
+
+function getModificationDate(date = new Date()) {
+  if (!(date instanceof Date)) {
+    date = new Date(date);
+  }
+  const buffer = [
+    date.getUTCFullYear().toString(),
+    (date.getUTCMonth() + 1).toString().padStart(2, "0"),
+    date.getUTCDate().toString().padStart(2, "0"),
+    date.getUTCHours().toString().padStart(2, "0"),
+    date.getUTCMinutes().toString().padStart(2, "0"),
+    date.getUTCSeconds().toString().padStart(2, "0"),
+  ];
+
+  return buffer.join("");
+}
+
+function getRotationMatrix(rotation, width, height) {
+  switch (rotation) {
+    case 90:
+      return [0, 1, -1, 0, width, 0];
+    case 180:
+      return [-1, 0, 0, -1, width, height];
+    case 270:
+      return [0, -1, 1, 0, 0, height];
+    default:
+      throw new Error("Invalid rotation");
+  }
+}
+
+/**
+ * Get the number of bytes to use to represent the given positive integer.
+ * If n is zero, the function returns 0 which means that we don't need to waste
+ * a byte to represent it.
+ * @param {number} x - a positive integer.
+ * @returns {number}
+ */
+function getSizeInBytes(x) {
+  // n bits are required for numbers up to 2^n - 1.
+  // So for a number x, we need ceil(log2(1 + x)) bits.
+  return Math.ceil(Math.ceil(Math.log2(1 + x)) / 8);
+}
+
+/** Resolve references from `changes` before falling back to the XRef. */
+class ChangesXRefWrapper {
+  #changes;
+
+  #xref;
+
+  constructor(changes, xref) {
+    this.#changes = changes;
+    this.#xref = xref;
+  }
+
+  getNewTemporaryRef() {
+    return this.#xref.getNewTemporaryRef();
+  }
+
+  fetch(ref) {
+    return this.#changes.has(ref)
+      ? this.#changes.get(ref).data
+      : this.#xref.fetch(ref);
+  }
+
+  fetchIfRef(obj) {
+    return obj instanceof Ref ? this.fetch(obj) : obj;
+  }
+
+  async fetchAsync(ref) {
+    return this.#changes.has(ref)
+      ? this.#changes.get(ref).data
+      : this.#xref.fetchAsync(ref);
+  }
+
+  async fetchIfRefAsync(obj) {
+    return obj instanceof Ref ? this.fetchAsync(obj) : obj;
+  }
+}
+
 export {
+  arrayBuffersToBytes,
+  ChangesXRefWrapper,
+  codePointIter,
   collectActions,
+  deepCompare,
   encodeToXmlString,
   escapePDFName,
-  getArrayLookupTableFactory,
+  escapeString,
   getInheritableProperty,
   getLookupTableFactory,
+  getModificationDate,
+  getNewAnnotationsMap,
+  getParentToUpdate,
+  getRotationMatrix,
+  getSizeInBytes,
+  IDENTITY_MATRIX,
+  isBooleanArray,
+  isNumberArray,
   isWhiteSpace,
-  log2,
+  lookupMatrix,
+  lookupNormalRect,
+  lookupRect,
+  MAX_INT_32,
   MissingDataException,
+  normalizeCSSFontFamily,
+  numberToString,
   ParserEOFException,
   parseXFAPath,
-  readInt8,
-  readUint16,
-  readUint32,
+  PDF_VERSION_REGEXP,
+  recoverJsURL,
+  RESOURCES_KEYS_OPERATOR_LIST,
+  RESOURCES_KEYS_TEXT_CONTENT,
   toRomanNumerals,
   validateCSSFont,
+  validateFontName,
   XRefEntryException,
   XRefParseException,
 };

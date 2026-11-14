@@ -13,8 +13,9 @@
  * limitations under the License.
  */
 
+import { MacStandardGlyphOrdering, normalizeFontName } from "./fonts_utils.js";
+import { getGlyphsUnicode } from "./glyphlist.js";
 import { getLookupTableFactory } from "./core_utils.js";
-import { normalizeFontName } from "./fonts_utils.js";
 
 /**
  * Hold a map of decoded fonts and of the standard fourteen Type1
@@ -54,10 +55,17 @@ const getStdFontMap = getLookupTableFactory(function (t) {
   t["Arial-Bold"] = "Helvetica-Bold";
   t["Arial-BoldItalic"] = "Helvetica-BoldOblique";
   t["Arial-Italic"] = "Helvetica-Oblique";
+  t.ArialMT = "Helvetica";
   t["Arial-BoldItalicMT"] = "Helvetica-BoldOblique";
   t["Arial-BoldMT"] = "Helvetica-Bold";
   t["Arial-ItalicMT"] = "Helvetica-Oblique";
-  t.ArialMT = "Helvetica";
+  t["Arial-BoldItalicMT-BoldItalic"] = "Helvetica-BoldOblique";
+  t["Arial-BoldMT-Bold"] = "Helvetica-Bold";
+  t["Arial-ItalicMT-Italic"] = "Helvetica-Oblique";
+  t.ArialUnicodeMS = "Helvetica";
+  t["ArialUnicodeMS-Bold"] = "Helvetica-Bold";
+  t["ArialUnicodeMS-BoldItalic"] = "Helvetica-BoldOblique";
+  t["ArialUnicodeMS-Italic"] = "Helvetica-Oblique";
   t["Courier-BoldItalic"] = "Courier-BoldOblique";
   t["Courier-Italic"] = "Courier-Oblique";
   t.CourierNew = "Courier";
@@ -70,6 +78,7 @@ const getStdFontMap = getLookupTableFactory(function (t) {
   t.CourierNewPSMT = "Courier";
   t["Helvetica-BoldItalic"] = "Helvetica-BoldOblique";
   t["Helvetica-Italic"] = "Helvetica-Oblique";
+  t["HelveticaLTStd-Bold"] = "Helvetica-Bold";
   t["Symbol-Bold"] = "Symbol";
   t["Symbol-BoldItalic"] = "Symbol";
   t["Symbol-Italic"] = "Symbol";
@@ -90,28 +99,6 @@ const getStdFontMap = getLookupTableFactory(function (t) {
   t["TimesNewRomanPSMT-Italic"] = "Times-Italic";
 });
 
-// Contains mapping for standard fonts and xfa fonts.
-const getFontNameToFileMap = getLookupTableFactory(function (t) {
-  t.Courier = "FoxitFixed.pfb";
-  t["Courier-Bold"] = "FoxitFixedBold.pfb";
-  t["Courier-BoldOblique"] = "FoxitFixedBoldItalic.pfb";
-  t["Courier-Oblique"] = "FoxitFixedItalic.pfb";
-  t.Helvetica = "FoxitSans.pfb";
-  t["Helvetica-Bold"] = "FoxitSansBold.pfb";
-  t["Helvetica-BoldOblique"] = "FoxitSansBoldItalic.pfb";
-  t["Helvetica-Oblique"] = "FoxitSansItalic.pfb";
-  t["Times-Roman"] = "FoxitSerif.pfb";
-  t["Times-Bold"] = "FoxitSerifBold.pfb";
-  t["Times-BoldItalic"] = "FoxitSerifBoldItalic.pfb";
-  t["Times-Italic"] = "FoxitSerifItalic.pfb";
-  t.Symbol = "FoxitSymbol.pfb";
-  t.ZapfDingbats = "FoxitDingbats.pfb";
-  t["LiberationSans-Regular"] = "LiberationSans-Regular.ttf";
-  t["LiberationSans-Bold"] = "LiberationSans-Bold.ttf";
-  t["LiberationSans-Italic"] = "LiberationSans-Italic.ttf";
-  t["LiberationSans-BoldItalic"] = "LiberationSans-BoldItalic.ttf";
-});
-
 /**
  * Holds the map of the non-standard fonts that might be included as
  * a standard fonts without glyph data.
@@ -129,6 +116,17 @@ const getNonStdFontMap = getLookupTableFactory(function (t) {
   t["ComicSansMS-Bold"] = "Comic Sans MS-Bold";
   t["ComicSansMS-BoldItalic"] = "Comic Sans MS-BoldItalic";
   t["ComicSansMS-Italic"] = "Comic Sans MS-Italic";
+  t.GillSansMT = "Helvetica";
+  t["GillSansMT-Bold"] = "Helvetica-Bold";
+  t["GillSansMT-BoldItalic"] = "Helvetica-BoldOblique";
+  t["GillSansMT-Italic"] = "Helvetica-Oblique";
+  t.Impact = "Helvetica";
+  t["ItcSymbol-Bold"] = "Helvetica-Bold";
+  t["ItcSymbol-BoldItalic"] = "Helvetica-BoldOblique";
+  t["ItcSymbol-Book"] = "Helvetica";
+  t["ItcSymbol-BookItalic"] = "Helvetica-Oblique";
+  t["ItcSymbol-Medium"] = "Helvetica";
+  t["ItcSymbol-MediumItalic"] = "Helvetica-Oblique";
   t.LucidaConsole = "Courier";
   t["LucidaConsole-Bold"] = "Courier-Bold";
   t["LucidaConsole-BoldItalic"] = "Courier-BoldOblique";
@@ -152,8 +150,10 @@ const getNonStdFontMap = getLookupTableFactory(function (t) {
   t["MS-PMincho-Italic"] = "MS PMincho-Italic";
   t.NuptialScript = "Times-Italic";
   t.SegoeUISymbol = "Helvetica";
-  t.Wingdings = "ZapfDingbats";
-  t["Wingdings-Regular"] = "ZapfDingbats";
+  t.TrebuchetMS = "Helvetica";
+  t["TrebuchetMS-Bold"] = "Helvetica-Bold";
+  t["TrebuchetMS-BoldItalic"] = "Helvetica-BoldOblique";
+  t["TrebuchetMS-Italic"] = "Helvetica-Oblique";
 });
 
 const getSerifFonts = getLookupTableFactory(function (t) {
@@ -237,6 +237,7 @@ const getSerifFonts = getLookupTableFactory(function (t) {
   t.Joanna = true;
   t.Korinna = true;
   t.Lexicon = true;
+  t.LiberationSerif = true;
   t["Liberation Serif"] = true;
   t["Linux Libertine"] = true;
   t.Literaturnaya = true;
@@ -296,6 +297,23 @@ const getSymbolsFonts = getLookupTableFactory(function (t) {
   t.Dingbats = true;
   t.Symbol = true;
   t.ZapfDingbats = true;
+  t.Wingdings = true;
+  t["Wingdings-Bold"] = true;
+  t["Wingdings-Regular"] = true;
+});
+
+// Base glyph map for fonts whose glyph ids follow the standard Macintosh
+// ordering implied by a `post` table of format 1. Fonts such as TrebuchetMS can
+// use part of this ordering with supplemental overrides.
+const getGlyphMapForMacOrderedFonts = getLookupTableFactory(function (t) {
+  const glyphsUnicode = getGlyphsUnicode();
+  t[2] = 10;
+  for (let gid = 3; gid < MacStandardGlyphOrdering.length; gid++) {
+    const unicode = glyphsUnicode[MacStandardGlyphOrdering[gid]];
+    if (unicode !== undefined) {
+      t[gid] = unicode;
+    }
+  }
 });
 
 // Glyph map for well-known standard fonts. Sometimes Ghostscript uses CID
@@ -471,8 +489,13 @@ const getGlyphMapForStandardFonts = getLookupTableFactory(function (t) {
   t[169] = 171;
   t[170] = 187;
   t[171] = 8230;
+  t[179] = 8220;
+  t[180] = 8221;
+  t[181] = 8216;
+  t[182] = 8217;
   t[200] = 193;
   t[203] = 205;
+  t[207] = 211;
   t[210] = 218;
   t[223] = 711;
   t[224] = 321;
@@ -517,6 +540,97 @@ const getGlyphMapForStandardFonts = getLookupTableFactory(function (t) {
   t[337] = 9552;
   t[493] = 1039;
   t[494] = 1040;
+  t[570] = 1040;
+  t[571] = 1041;
+  t[572] = 1042;
+  t[573] = 1043;
+  t[574] = 1044;
+  t[575] = 1045;
+  t[576] = 1046;
+  t[577] = 1047;
+  t[578] = 1048;
+  t[579] = 1049;
+  t[580] = 1050;
+  t[581] = 1051;
+  t[582] = 1052;
+  t[583] = 1053;
+  t[584] = 1054;
+  t[585] = 1055;
+  t[586] = 1056;
+  t[587] = 1057;
+  t[588] = 1058;
+  t[589] = 1059;
+  t[590] = 1060;
+  t[591] = 1061;
+  t[592] = 1062;
+  t[593] = 1063;
+  t[594] = 1064;
+  t[595] = 1065;
+  t[596] = 1066;
+  t[597] = 1067;
+  t[598] = 1068;
+  t[599] = 1069;
+  t[600] = 1070;
+  t[601] = 1071;
+  t[602] = 1072;
+  t[603] = 1073;
+  t[604] = 1074;
+  t[605] = 1075;
+  t[606] = 1076;
+  t[607] = 1077;
+  t[608] = 1078;
+  t[609] = 1079;
+  t[610] = 1080;
+  t[611] = 1081;
+  t[612] = 1082;
+  t[613] = 1083;
+  t[614] = 1084;
+  t[615] = 1085;
+  t[616] = 1086;
+  t[617] = 1087;
+  t[618] = 1088;
+  t[619] = 1089;
+  t[620] = 1090;
+  t[621] = 1091;
+  t[622] = 1092;
+  t[623] = 1093;
+  t[624] = 1094;
+  t[625] = 1095;
+  t[626] = 1096;
+  t[627] = 1097;
+  t[628] = 1098;
+  t[629] = 1099;
+  t[630] = 1100;
+  t[631] = 1101;
+  t[632] = 1102;
+  t[633] = 1103;
+  t[672] = 1488;
+  t[673] = 1489;
+  t[674] = 1490;
+  t[675] = 1491;
+  t[676] = 1492;
+  t[677] = 1493;
+  t[678] = 1494;
+  t[679] = 1495;
+  t[680] = 1496;
+  t[681] = 1497;
+  t[682] = 1498;
+  t[683] = 1499;
+  t[684] = 1500;
+  t[685] = 1501;
+  t[686] = 1502;
+  t[687] = 1503;
+  t[688] = 1504;
+  t[689] = 1505;
+  t[690] = 1506;
+  t[691] = 1507;
+  t[692] = 1508;
+  t[693] = 1509;
+  t[694] = 1510;
+  t[695] = 1511;
+  t[696] = 1512;
+  t[697] = 1513;
+  t[698] = 1514;
   t[705] = 1524;
   t[706] = 8362;
   t[710] = 64288;
@@ -704,16 +818,102 @@ const getGlyphMapForStandardFonts = getLookupTableFactory(function (t) {
   t[3416] = 8377;
 });
 
+// TrebuchetMS largely follows the standard Macintosh glyph ordering through
+// glyph id 235, with the exceptions below. Additional mappings for the affected
+// Latin glyph repertoire follow.
+const getSupplementalGlyphMapForTrebuchetMS = getLookupTableFactory(
+  function (t) {
+    // A few of the standard Macintosh glyph slots hold a different, but
+    // similar looking, glyph in TrebuchetMS.
+    t[151] = 956;
+    t[159] = 937;
+    t[168] = 916;
+    t[189] = 8364;
+    t[195] = 8729;
+    t[218] = 713;
+
+    t[236] = 222;
+    t[237] = 254;
+    t[238] = 8722;
+    t[239] = 185;
+    t[240] = 178;
+    t[241] = 179;
+    t[242] = 189;
+    t[243] = 188;
+    t[244] = 190;
+    t[245] = 181;
+    t[246] = 8486;
+    t[247] = 8710;
+    t[248] = 253;
+    t[249] = 215;
+    t[250] = 173;
+    t[253] = 8355;
+    t[254] = 286;
+    t[255] = 287;
+    t[256] = 304;
+    t[257] = 350;
+    t[258] = 351;
+    t[259] = 262;
+    t[260] = 263;
+    t[261] = 268;
+    t[262] = 269;
+    t[263] = 273;
+    t[264] = 175;
+    t[266] = 183;
+    t[267] = 258;
+    t[268] = 259;
+    t[269] = 260;
+    t[270] = 261;
+    t[271] = 270;
+    t[272] = 271;
+    t[273] = 272;
+    t[274] = 280;
+    t[275] = 281;
+    t[276] = 282;
+    t[277] = 283;
+    t[278] = 313;
+    t[279] = 314;
+    t[280] = 317;
+    t[281] = 318;
+    t[282] = 319;
+    t[283] = 320;
+    t[284] = 323;
+    t[285] = 324;
+    t[286] = 327;
+    t[287] = 328;
+    t[288] = 336;
+    t[289] = 337;
+    t[290] = 340;
+    t[291] = 341;
+    t[292] = 344;
+    t[293] = 345;
+    t[294] = 346;
+    t[295] = 347;
+    t[296] = 538;
+    t[297] = 539;
+    t[298] = 356;
+    t[299] = 357;
+    t[300] = 366;
+    t[301] = 367;
+    t[302] = 368;
+    t[303] = 369;
+    t[304] = 377;
+    t[305] = 378;
+    t[306] = 379;
+    t[307] = 380;
+  }
+);
+
 // The glyph map for ArialBlack differs slightly from the glyph map used for
 // other well-known standard fonts. Hence we use this (incomplete) CID to GID
 // mapping to adjust the glyph map for non-embedded ArialBlack fonts.
-const getSupplementalGlyphMapForArialBlack = getLookupTableFactory(function (
-  t
-) {
-  t[227] = 322;
-  t[264] = 261;
-  t[291] = 346;
-});
+const getSupplementalGlyphMapForArialBlack = getLookupTableFactory(
+  function (t) {
+    t[227] = 322;
+    t[264] = 261;
+    t[291] = 346;
+  }
+);
 
 // The glyph map for Calibri (a Windows font) differs from the glyph map used
 // in the standard fonts. Hence we use this (incomplete) CID to GID mapping to
@@ -721,18 +921,22 @@ const getSupplementalGlyphMapForArialBlack = getLookupTableFactory(function (
 const getSupplementalGlyphMapForCalibri = getLookupTableFactory(function (t) {
   t[1] = 32;
   t[4] = 65;
+  t[5] = 192;
   t[6] = 193;
+  t[9] = 196;
   t[17] = 66;
   t[18] = 67;
   t[21] = 268;
   t[24] = 68;
   t[28] = 69;
+  t[29] = 200;
   t[30] = 201;
   t[32] = 282;
   t[38] = 70;
   t[39] = 71;
   t[44] = 72;
   t[47] = 73;
+  t[48] = 204;
   t[49] = 205;
   t[58] = 74;
   t[60] = 75;
@@ -740,6 +944,8 @@ const getSupplementalGlyphMapForCalibri = getLookupTableFactory(function (t) {
   t[68] = 77;
   t[69] = 78;
   t[75] = 79;
+  t[76] = 210;
+  t[80] = 214;
   t[87] = 80;
   t[89] = 81;
   t[90] = 82;
@@ -748,6 +954,7 @@ const getSupplementalGlyphMapForCalibri = getLookupTableFactory(function (t) {
   t[97] = 352;
   t[100] = 84;
   t[104] = 85;
+  t[109] = 220;
   t[115] = 86;
   t[116] = 87;
   t[121] = 88;
@@ -756,7 +963,9 @@ const getSupplementalGlyphMapForCalibri = getLookupTableFactory(function (t) {
   t[127] = 90;
   t[129] = 381;
   t[258] = 97;
+  t[259] = 224;
   t[260] = 225;
+  t[263] = 228;
   t[268] = 261;
   t[271] = 98;
   t[272] = 99;
@@ -764,6 +973,7 @@ const getSupplementalGlyphMapForCalibri = getLookupTableFactory(function (t) {
   t[275] = 269;
   t[282] = 100;
   t[286] = 101;
+  t[287] = 232;
   t[288] = 233;
   t[290] = 283;
   t[295] = 281;
@@ -771,6 +981,7 @@ const getSupplementalGlyphMapForCalibri = getLookupTableFactory(function (t) {
   t[336] = 103;
   t[346] = 104;
   t[349] = 105;
+  t[350] = 236;
   t[351] = 237;
   t[361] = 106;
   t[364] = 107;
@@ -779,7 +990,9 @@ const getSupplementalGlyphMapForCalibri = getLookupTableFactory(function (t) {
   t[373] = 109;
   t[374] = 110;
   t[381] = 111;
+  t[382] = 242;
   t[383] = 243;
+  t[386] = 246;
   t[393] = 112;
   t[395] = 113;
   t[396] = 114;
@@ -789,6 +1002,7 @@ const getSupplementalGlyphMapForCalibri = getLookupTableFactory(function (t) {
   t[403] = 353;
   t[410] = 116;
   t[437] = 117;
+  t[442] = 252;
   t[448] = 118;
   t[449] = 119;
   t[454] = 120;
@@ -808,6 +1022,7 @@ const getSupplementalGlyphMapForCalibri = getLookupTableFactory(function (t) {
   t[896] = 91;
   t[897] = 93;
   t[923] = 64;
+  t[940] = 163;
   t[1004] = 48;
   t[1005] = 49;
   t[1006] = 50;
@@ -829,8 +1044,18 @@ function getStandardFontName(name) {
   return stdFontMap[fontName];
 }
 
+function isKnownFontName(name) {
+  const fontName = normalizeFontName(name);
+  return !!(
+    getStdFontMap()[fontName] ||
+    getNonStdFontMap()[fontName] ||
+    getSerifFonts()[fontName] ||
+    getSymbolsFonts()[fontName]
+  );
+}
+
 export {
-  getFontNameToFileMap,
+  getGlyphMapForMacOrderedFonts,
   getGlyphMapForStandardFonts,
   getNonStdFontMap,
   getSerifFonts,
@@ -838,5 +1063,7 @@ export {
   getStdFontMap,
   getSupplementalGlyphMapForArialBlack,
   getSupplementalGlyphMapForCalibri,
+  getSupplementalGlyphMapForTrebuchetMS,
   getSymbolsFonts,
+  isKnownFontName,
 };

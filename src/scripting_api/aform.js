@@ -13,68 +13,59 @@
  * limitations under the License.
  */
 
+import { DateFormats, TimeFormats } from "../shared/scripting_utils.js";
 import { GlobalConstants } from "./constants.js";
+import { MathClamp } from "../shared/math_clamp.js";
+import { mergeChange } from "./event.js";
 
 class AForm {
-  constructor(document, app, util, color) {
-    this._document = document;
-    this._app = app;
-    this._util = util;
-    this._color = color;
-    this._dateFormats = [
-      "m/d",
-      "m/d/yy",
-      "mm/dd/yy",
-      "mm/yy",
-      "d-mmm",
-      "d-mmm-yy",
-      "dd-mmm-yy",
-      "yy-mm-dd",
-      "mmm-yy",
-      "mmmm-yy",
-      "mmm d, yyyy",
-      "mmmm d, yyyy",
-      "m/d/yy h:MM tt",
-      "m/d/yy HH:MM",
-    ];
-    this._timeFormats = ["HH:MM", "h:MM tt", "HH:MM:ss", "h:MM:ss tt"];
+  #document;
 
-    // The e-mail address regex below originates from:
-    // https://html.spec.whatwg.org/multipage/input.html#valid-e-mail-address
-    this._emailRegex = new RegExp(
-      "^[a-zA-Z0-9.!#$%&'*+\\/=?^_`{|}~-]+" +
-        "@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?" +
-        "(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$"
-    );
+  #app;
+
+  #util;
+
+  #color;
+
+  // HTML email validation pattern:
+  // https://html.spec.whatwg.org/multipage/input.html#valid-e-mail-address
+  // eslint-disable-next-line regexp/use-ignore-case
+  #emailRegex = new RegExp(
+    "^[\\w.!#$%&'*+/=?^`{|}~-]+" +
+      "@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?" +
+      "(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$"
+  );
+
+  constructor(document, app, util, color) {
+    this.#document = document;
+    this.#app = app;
+    this.#util = util;
+    this.#color = color;
   }
 
-  _mkTargetName(event) {
+  #mkTargetName(event) {
     return event.target ? `[ ${event.target.name} ]` : "";
   }
 
-  _parseDate(cFormat, cDate) {
-    const ddate = Date.parse(cDate);
-    if (isNaN(ddate)) {
-      try {
-        return this._util.scand(cFormat, cDate);
-      } catch (error) {
-        return null;
-      }
-    } else {
-      return new Date(ddate);
+  #parseDate(cFormat, cDate) {
+    let date = null;
+    try {
+      date = this.#util.scand(cFormat, cDate);
+    } catch {}
+    if (date) {
+      return date;
     }
+
+    date = Date.parse(cDate);
+    return isNaN(date) ? null : new Date(date);
   }
 
   AFMergeChange(event = globalThis.event) {
-    if (event.willCommit) {
-      return event.value.toString();
-    }
-
-    return this._app._eventDispatcher.mergeChange(event);
+    return event.willCommit ? event.value.toString() : mergeChange(event);
   }
 
   AFParseDateEx(cString, cOrder) {
-    return this._parseDate(cOrder, cString);
+    return this.#parseDate(cOrder, cString);
   }
 
   AFExtractNums(str) {
@@ -90,12 +81,8 @@ class AForm {
       str = `0${str}`;
     }
 
-    const numbers = str.match(/([0-9]+)/g);
-    if (numbers.length === 0) {
-      return null;
-    }
-
-    return numbers;
+    const numbers = str.match(/(\d+)/g);
+    return numbers.length === 0 ? null : numbers;
   }
 
   AFMakeNumber(str) {
@@ -108,18 +95,11 @@ class AForm {
 
     str = str.trim().replace(",", ".");
     const number = parseFloat(str);
-    if (isNaN(number) || !isFinite(number)) {
-      return null;
-    }
-
-    return number;
+    return isNaN(number) || !isFinite(number) ? null : number;
   }
 
   AFMakeArrayFromList(string) {
-    if (typeof string === "string") {
-      return string.split(/, ?/g);
-    }
-    return string;
+    return typeof string === "string" ? string.split(/, ?/g) : string;
   }
 
   AFNumber_Format(
@@ -131,10 +111,6 @@ class AForm {
     bCurrencyPrepend
   ) {
     const event = globalThis.event;
-    if (!event.value) {
-      return;
-    }
-
     let value = this.AFMakeNumber(event.value);
     if (value === null) {
       event.value = "";
@@ -159,7 +135,7 @@ class AForm {
     }
 
     // sepStyle is an integer in [0;4]
-    sepStyle = Math.min(Math.max(0, Math.floor(sepStyle)), 4);
+    sepStyle = MathClamp(Math.floor(sepStyle), 0, 4);
 
     buf.push("%,", sepStyle, ".", nDec.toString(), "f");
 
@@ -172,7 +148,7 @@ class AForm {
     }
 
     if (negStyle === 1 || negStyle === 3) {
-      event.target.textColor = sign === 1 ? this._color.black : this._color.red;
+      event.target.textColor = sign === 1 ? this.#color.black : this.#color.red;
     }
 
     if ((negStyle !== 0 || bCurrencyPrepend) && sign === -1) {
@@ -180,7 +156,7 @@ class AForm {
     }
 
     const formatStr = buf.join("");
-    event.value = this._util.printf(formatStr, value);
+    event.value = this.#util.printf(formatStr, value);
   }
 
   AFNumber_Keystroke(
@@ -202,21 +178,19 @@ class AForm {
     if (sepStyle > 1) {
       // comma sep
       pattern = event.willCommit
-        ? /^[+-]?([0-9]+(,[0-9]*)?|,[0-9]+)$/
-        : /^[+-]?[0-9]*,?[0-9]*$/;
+        ? /^[+-]?(\d+(,\d*)?|,\d+)$/
+        : /^[+-]?\d*(?:,\d*)?$/;
     } else {
       // dot sep
       pattern = event.willCommit
-        ? /^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)$/
-        : /^[+-]?[0-9]*\.?[0-9]*$/;
+        ? /^[+-]?(\d+(\.\d*)?|\.\d+)$/
+        : /^[+-]?\d*(?:\.\d*)?$/;
     }
 
     if (!pattern.test(value)) {
       if (event.willCommit) {
-        const err = `${GlobalConstants.IDS_INVALID_VALUE} ${this._mkTargetName(
-          event
-        )}`;
-        this._app.alert(err);
+        const err = `${GlobalConstants.IDS_INVALID_VALUE} ${this.#mkTargetName(event)}`;
+        this.#app.alert(err);
       }
       event.rc = false;
     }
@@ -227,10 +201,7 @@ class AForm {
   }
 
   AFPercent_Format(nDec, sepStyle, percentPrepend = false) {
-    if (typeof nDec !== "number") {
-      return;
-    }
-    if (typeof sepStyle !== "number") {
+    if (typeof nDec !== "number" || typeof sepStyle !== "number") {
       return;
     }
     if (nDec < 0) {
@@ -246,7 +217,7 @@ class AForm {
     nDec = Math.floor(nDec);
 
     // sepStyle is an integer in [0;4]
-    sepStyle = Math.min(Math.max(0, Math.floor(sepStyle)), 4);
+    sepStyle = MathClamp(Math.floor(sepStyle), 0, 4);
 
     let value = this.AFMakeNumber(event.value);
     if (value === null) {
@@ -255,13 +226,9 @@ class AForm {
     }
 
     const formatStr = `%,${sepStyle}.${nDec}f`;
-    value = this._util.printf(formatStr, value * 100);
+    value = this.#util.printf(formatStr, value * 100);
 
-    if (percentPrepend) {
-      event.value = `%${value}`;
-    } else {
-      event.value = `${value}%`;
-    }
+    event.value = percentPrepend ? `%${value}` : `${value}%`;
   }
 
   AFPercent_Keystroke(nDec, sepStyle) {
@@ -275,16 +242,14 @@ class AForm {
       return;
     }
 
-    const date = this._parseDate(cFormat, value);
+    const date = this.#parseDate(cFormat, value);
     if (date !== null) {
-      event.value = this._util.printd(cFormat, date);
+      event.value = this.#util.printd(cFormat, date);
     }
   }
 
   AFDate_Format(pdf) {
-    if (pdf >= 0 && pdf < this._dateFormats.length) {
-      this.AFDate_FormatEx(this._dateFormats[pdf]);
-    }
+    this.AFDate_FormatEx(DateFormats[pdf] ?? pdf);
   }
 
   AFDate_KeystrokeEx(cFormat) {
@@ -298,20 +263,20 @@ class AForm {
       return;
     }
 
-    if (this._parseDate(cFormat, value) === null) {
+    if (this.#parseDate(cFormat, value) === null) {
       const invalid = GlobalConstants.IDS_INVALID_DATE;
       const invalid2 = GlobalConstants.IDS_INVALID_DATE2;
-      const err = `${invalid} ${this._mkTargetName(
+      const err = `${invalid} ${this.#mkTargetName(
         event
       )}${invalid2}${cFormat}`;
-      this._app.alert(err);
+      this.#app.alert(err);
       event.rc = false;
     }
   }
 
   AFDate_Keystroke(pdf) {
-    if (pdf >= 0 && pdf < this._dateFormats.length) {
-      this.AFDate_KeystrokeEx(this._dateFormats[pdf]);
+    if (pdf >= 0 && pdf < DateFormats.length) {
+      this.AFDate_KeystrokeEx(DateFormats[pdf]);
     }
   }
 
@@ -346,7 +311,7 @@ class AForm {
     let err = "";
     if (bGreaterThan && bLessThan) {
       if (value < nGreaterThan || value > nLessThan) {
-        err = this._util.printf(
+        err = this.#util.printf(
           GlobalConstants.IDS_GT_AND_LT,
           nGreaterThan,
           nLessThan
@@ -354,13 +319,13 @@ class AForm {
       }
     } else if (bGreaterThan) {
       if (value < nGreaterThan) {
-        err = this._util.printf(GlobalConstants.IDS_GREATER_THAN, nGreaterThan);
+        err = this.#util.printf(GlobalConstants.IDS_GREATER_THAN, nGreaterThan);
       }
     } else if (value > nLessThan) {
-      err = this._util.printf(GlobalConstants.IDS_LESS_THAN, nLessThan);
+      err = this.#util.printf(GlobalConstants.IDS_LESS_THAN, nLessThan);
     }
     if (err) {
-      this._app.alert(err);
+      this.#app.alert(err);
       event.rc = false;
     }
   }
@@ -394,13 +359,11 @@ class AForm {
 
   AFSimple_Calculate(cFunction, cFields) {
     const actions = {
-      AVG: args => args.reduce((acc, value) => acc + value, 0) / args.length,
-      SUM: args => args.reduce((acc, value) => acc + value, 0),
+      AVG: args => Math.sumPrecise(args) / args.length,
+      SUM: args => Math.sumPrecise(args),
       PRD: args => args.reduce((acc, value) => acc * value, 1),
-      MIN: args =>
-        args.reduce((acc, value) => Math.min(acc, value), Number.MAX_VALUE),
-      MAX: args =>
-        args.reduce((acc, value) => Math.max(acc, value), Number.MIN_VALUE),
+      MIN: args => Math.min(...args),
+      MAX: args => Math.max(...args),
     };
 
     if (!(cFunction in actions)) {
@@ -409,16 +372,21 @@ class AForm {
 
     const event = globalThis.event;
     const values = [];
+
+    cFields = this.AFMakeArrayFromList(cFields);
     for (const cField of cFields) {
-      const field = this._document.getField(cField);
-      const number = this.AFMakeNumber(field.value);
-      if (number !== null) {
-        values.push(number);
+      const field = this.#document.getField(cField);
+      if (!field) {
+        continue;
+      }
+      for (const child of field.getArray()) {
+        const number = this.AFMakeNumber(child.value);
+        values.push(number ?? 0);
       }
     }
 
     if (values.length === 0) {
-      event.value = cFunction === "PRD" ? 1 : 0;
+      event.value = 0;
       return;
     }
 
@@ -433,11 +401,8 @@ class AForm {
     }
 
     psf = this.AFMakeNumber(psf);
-    if (psf === null) {
-      throw new Error("Invalid psf in AFSpecial_Format");
-    }
 
-    let formatStr = "";
+    let formatStr;
     switch (psf) {
       case 0:
         formatStr = "99999";
@@ -446,11 +411,10 @@ class AForm {
         formatStr = "99999-9999";
         break;
       case 2:
-        if (this._util.printx("9999999999", event.value).length >= 10) {
-          formatStr = "(999) 999-9999";
-        } else {
-          formatStr = "999-9999";
-        }
+        formatStr =
+          this.#util.printx("9999999999", event.value).length >= 10
+            ? "(999) 999-9999"
+            : "999-9999";
         break;
       case 3:
         formatStr = "999-99-9999";
@@ -459,16 +423,36 @@ class AForm {
         throw new Error("Invalid psf in AFSpecial_Format");
     }
 
-    event.value = this._util.printx(formatStr, event.value);
+    event.value = this.#util.printx(formatStr, event.value);
   }
 
   AFSpecial_KeystrokeEx(cMask) {
+    const event = globalThis.event;
+
+    // Simplify the format string by removing all characters that are not
+    // specific to the format because the user could enter 1234567 when the
+    // format is 999-9999.
+    const simplifiedFormatStr = cMask.replaceAll(/[^9AOX]/g, "");
+    this.#AFSpecial_KeystrokeEx_helper(simplifiedFormatStr, null, false);
+    if (event.rc) {
+      return;
+    }
+
+    event.rc = true;
+    this.#AFSpecial_KeystrokeEx_helper(cMask, null, true);
+  }
+
+  #AFSpecial_KeystrokeEx_helper(cMask, value, warn) {
     if (!cMask) {
       return;
     }
 
     const event = globalThis.event;
-    const value = this.AFMergeChange(event);
+    value ||= this.AFMergeChange(event);
+    if (!value) {
+      return;
+    }
+
     const checkers = new Map([
       ["9", char => char >= "0" && char <= "9"],
       [
@@ -486,7 +470,7 @@ class AForm {
     ]);
 
     function _checkValidity(_value, _cMask) {
-      for (let i = 0, ii = value.length; i < ii; i++) {
+      for (let i = 0, ii = _value.length; i < ii; i++) {
         const mask = _cMask.charAt(i);
         const char = _value.charAt(i);
         const checker = checkers.get(mask);
@@ -501,27 +485,29 @@ class AForm {
       return true;
     }
 
-    if (!value) {
-      return;
-    }
-
     const err = `${GlobalConstants.IDS_INVALID_VALUE} = "${cMask}"`;
 
     if (value.length > cMask.length) {
-      this._app.alert(err);
+      if (warn) {
+        this.#app.alert(err);
+      }
       event.rc = false;
       return;
     }
 
     if (event.willCommit) {
       if (value.length < cMask.length) {
-        this._app.alert(err);
+        if (warn) {
+          this.#app.alert(err);
+        }
         event.rc = false;
         return;
       }
 
       if (!_checkValidity(value, cMask)) {
-        this._app.alert(err);
+        if (warn) {
+          this.#app.alert(err);
+        }
         event.rc = false;
         return;
       }
@@ -534,23 +520,19 @@ class AForm {
     }
 
     if (!_checkValidity(value, cMask)) {
-      this._app.alert(err);
+      if (warn) {
+        this.#app.alert(err);
+      }
       event.rc = false;
     }
   }
 
   AFSpecial_Keystroke(psf) {
     const event = globalThis.event;
-    if (!event.value) {
-      return;
-    }
-
     psf = this.AFMakeNumber(psf);
-    if (psf === null) {
-      throw new Error("Invalid psf in AFSpecial_Keystroke");
-    }
 
-    let formatStr;
+    let value = this.AFMergeChange(event);
+    let formatStr, secondFormatStr;
     switch (psf) {
       case 0:
         formatStr = "99999";
@@ -559,16 +541,8 @@ class AForm {
         formatStr = "99999-9999";
         break;
       case 2:
-        const finalLen =
-          event.value.length +
-          event.change.length +
-          event.selStart -
-          event.selEnd;
-        if (finalLen >= 8) {
-          formatStr = "(999) 999-9999";
-        } else {
-          formatStr = "999-9999";
-        }
+        formatStr = "999-9999";
+        secondFormatStr = "(999) 999-9999";
         break;
       case 3:
         formatStr = "999-99-9999";
@@ -576,8 +550,36 @@ class AForm {
       default:
         throw new Error("Invalid psf in AFSpecial_Keystroke");
     }
+    const formats = secondFormatStr
+      ? [formatStr, secondFormatStr]
+      : [formatStr];
+    for (const format of formats) {
+      this.#AFSpecial_KeystrokeEx_helper(format, value, false);
+      if (event.rc) {
+        return;
+      }
+      event.rc = true;
+    }
 
-    this.AFSpecial_KeystrokeEx(formatStr);
+    const re = /[-()\s]+/g;
+    value = value.replaceAll(re, "");
+    for (const format of formats) {
+      this.#AFSpecial_KeystrokeEx_helper(
+        format.replaceAll(re, ""),
+        value,
+        false
+      );
+      if (event.rc) {
+        return;
+      }
+      event.rc = true;
+    }
+
+    this.AFSpecial_KeystrokeEx(
+      ((secondFormatStr && value.match(/\d/g)) || []).length > 7
+        ? secondFormatStr
+        : formatStr
+    );
   }
 
   AFTime_FormatEx(cFormat) {
@@ -585,9 +587,7 @@ class AForm {
   }
 
   AFTime_Format(pdf) {
-    if (pdf >= 0 && pdf < this._timeFormats.length) {
-      this.AFDate_FormatEx(this._timeFormats[pdf]);
-    }
+    this.AFDate_FormatEx(TimeFormats[pdf] ?? pdf);
   }
 
   AFTime_KeystrokeEx(cFormat) {
@@ -595,13 +595,19 @@ class AForm {
   }
 
   AFTime_Keystroke(pdf) {
-    if (pdf >= 0 && pdf < this._timeFormats.length) {
-      this.AFDate_KeystrokeEx(this._timeFormats[pdf]);
+    if (pdf >= 0 && pdf < TimeFormats.length) {
+      this.AFDate_KeystrokeEx(TimeFormats[pdf]);
     }
   }
 
   eMailValidate(str) {
-    return this._emailRegex.test(str);
+    return this.#emailRegex.test(str);
+  }
+
+  AFExactMatch(rePatterns, str) {
+    return rePatterns instanceof RegExp
+      ? str.match(rePatterns)?.[0] === str || 0
+      : rePatterns.findIndex(re => str.match(re)?.[0] === str) + 1;
   }
 }
 

@@ -15,11 +15,9 @@
  */
 /* eslint-disable no-var */
 
-"use strict";
-
-var assert = require("assert");
-var fs = require("fs");
-var vm = require("vm");
+import assert from "assert";
+import fs from "fs";
+import vm from "vm";
 
 var SRC_DIR = __dirname + "/../../";
 var telemetryJsPath = "extensions/chromium/telemetry.js";
@@ -98,7 +96,7 @@ function createExtensionGlobal() {
   };
   window.Headers = function (headers) {
     headers = JSON.parse(JSON.stringify(headers)); // Clone.
-    Object.keys(headers).forEach(function (k) {
+    Object.keys(headers).forEach(k => {
       headers[k] = String(headers[k]);
     });
     return headers;
@@ -138,13 +136,11 @@ function createExtensionGlobal() {
   };
   window.Date = {
     test_now_value: Date.now(),
-    now() {
-      return window.Date.test_now_value;
-    },
+    now: () => window.Date.test_now_value,
   };
   window.test_fireTimers = function () {
     assert.ok(timers.length);
-    timers.forEach(function (timer) {
+    timers.forEach(timer => {
       timer();
     });
   };
@@ -156,9 +152,7 @@ function createExtensionGlobal() {
 function updateBrowser(window) {
   window.navigator.userAgent = window.navigator.userAgent.replace(
     /Chrome\/(\d+)/,
-    function (_, v) {
-      return "Chrome/" + (parseInt(v) + 1);
-    }
+    (_, v) => "Chrome/" + (parseInt(v, 10) + 1)
   );
 }
 

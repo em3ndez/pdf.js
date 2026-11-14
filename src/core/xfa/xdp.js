@@ -14,13 +14,8 @@
  */
 
 import { $buildXFAObject, NamespaceIds } from "./namespaces.js";
-import {
-  $namespaceId,
-  $nodeName,
-  $onChildCheck,
-  XFAObject,
-  XFAObjectArray,
-} from "./xfa_object.js";
+import { $namespaceId, $nodeName, $onChildCheck } from "./symbol_utils.js";
+import { XFAObject, XFAObjectArray } from "./xfa_object.js";
 
 const XDP_NS_ID = NamespaceIds.xdp.id;
 
@@ -45,10 +40,9 @@ class Xdp extends XFAObject {
 
 class XdpNamespace {
   static [$buildXFAObject](name, attributes) {
-    if (XdpNamespace.hasOwnProperty(name)) {
-      return XdpNamespace[name](attributes);
-    }
-    return undefined;
+    return Object.hasOwn(XdpNamespace, name)
+      ? XdpNamespace[name](attributes)
+      : undefined;
   }
 
   static xdp(attributes) {

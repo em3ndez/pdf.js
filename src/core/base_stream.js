@@ -17,16 +17,27 @@ import { bytesToString, shadow, unreachable } from "../shared/util.js";
 
 class BaseStream {
   constructor() {
-    if (this.constructor === BaseStream) {
+    if (
+      (typeof PDFJSDev === "undefined" || PDFJSDev.test("TESTING")) &&
+      this.constructor === BaseStream
+    ) {
       unreachable("Cannot initialize BaseStream.");
     }
   }
 
+  /**
+   * @abstract
+   * @returns {number}
+   */
   // eslint-disable-next-line getter-return
   get length() {
     unreachable("Abstract getter `length` accessed");
   }
 
+  /**
+   * @abstract
+   * @returns {boolean}
+   */
   // eslint-disable-next-line getter-return
   get isEmpty() {
     unreachable("Abstract getter `isEmpty` accessed");
@@ -40,8 +51,50 @@ class BaseStream {
     unreachable("Abstract method `getByte` called");
   }
 
-  getBytes(length, forceClamped = false) {
+  /**
+   * @abstract
+   * @param {number | undefined} [length]
+   * @returns {Uint8Array}
+   */
+  getBytes(length) {
     unreachable("Abstract method `getBytes` called");
+  }
+
+  /**
+   * NOTE: This method can only be used to get image-data that is guaranteed
+   *       to be fully loaded, since otherwise intermittent errors may occur;
+   *       note the `ObjectLoader` class.
+   */
+  async getImageData(length, decoderOptions) {
+    return this.getBytes(length, decoderOptions);
+  }
+
+  async asyncGetBytes() {
+    unreachable("Abstract method `asyncGetBytes` called");
+  }
+
+  get isAsync() {
+    return false;
+  }
+
+  get isAsyncDecoder() {
+    return false;
+  }
+
+  get isImageStream() {
+    return false;
+  }
+
+  get canAsyncDecodeImageFromBuffer() {
+    return false;
+  }
+
+  /**
+   * @param {number} width - The width from the image dictionary.
+   * @param {number} height - The height from the image dictionary.
+   */
+  async getTransferableImage(width, height) {
+    return null;
   }
 
   peekByte() {
@@ -52,8 +105,8 @@ class BaseStream {
     return peekedByte;
   }
 
-  peekBytes(length, forceClamped = false) {
-    const bytes = this.getBytes(length, forceClamped);
+  peekBytes(length) {
+    const bytes = this.getBytes(length);
     this.pos -= bytes.length;
     return bytes;
   }
@@ -61,10 +114,7 @@ class BaseStream {
   getUint16() {
     const b0 = this.getByte();
     const b1 = this.getByte();
-    if (b0 === -1 || b1 === -1) {
-      return -1;
-    }
-    return (b0 << 8) + b1;
+    return b0 === -1 || b1 === -1 ? -1 : (b0 << 8) + b1;
   }
 
   getInt32() {
@@ -80,7 +130,7 @@ class BaseStream {
   }
 
   getString(length) {
-    return bytesToString(this.getBytes(length, /* forceClamped = */ false));
+    return bytesToString(this.getBytes(length));
   }
 
   skip(n) {
@@ -99,11 +149,19 @@ class BaseStream {
     unreachable("Abstract method `makeSubStream` called");
   }
 
+  clone() {
+    unreachable("Abstract method `clone` called");
+  }
+
   /**
    * @returns {Array | null}
    */
   getBaseStreams() {
     return null;
+  }
+
+  getOriginalStream() {
+    return this.stream?.getOriginalStream() || this;
   }
 }
 

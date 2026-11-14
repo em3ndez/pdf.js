@@ -13,13 +13,102 @@
  * limitations under the License.
  */
 
-import { createActionsMap, FieldType, getFieldType } from "./common.js";
-import { Color } from "./color.js";
-import { PDFObject } from "./pdf_object.js";
+import { addPublicFunctions, makeArr, serializeError } from "./app_utils.js";
+import { createMap, FieldType, getFieldType } from "./common.js";
+import { isValidColor } from "./color.js";
 
-class Field extends PDFObject {
-  constructor(data) {
-    super(data);
+// Internal helpers for Doc and EventDispatcher, populated by the static block.
+const FieldInternals = Object.create(null);
+
+// Shared accessors for the instance properties of non-terminal fields.
+let containerDescriptors = null;
+
+// Properties stored in #viewProps and sent to the view by #update.
+const VIEW_PROPERTIES = [
+  "display",
+  "editable",
+  "hidden",
+  "multipleSelection",
+  "print",
+  "readonly",
+  "required",
+  "userName",
+];
+
+class Field {
+  #actions;
+
+  #appObjects;
+
+  #browseForFileToSubmit;
+
+  #buttonCaption = null;
+
+  #buttonIcon = null;
+
+  #charLimit;
+
+  #children = null;
+
+  #containerProps = null;
+
+  #currentValueIndices;
+
+  #datetimeFormat;
+
+  #fieldPath;
+
+  #fieldType;
+
+  #fillColor;
+
+  #getTerminalChildren;
+
+  #globalEval;
+
+  #hasDateOrTime;
+
+  #hasValue;
+
+  #id;
+
+  #isCheckbox = false;
+
+  #isChoice;
+
+  #items;
+
+  #kidIds;
+
+  #originalValue;
+
+  #otherWidgetIds = null;
+
+  #page;
+
+  #radioActions = null;
+
+  #radioIds = null;
+
+  #radioPages = null;
+
+  #rotation;
+
+  #send;
+
+  #sendError;
+
+  #strokeColor;
+
+  #textColor;
+
+  #util;
+
+  #value = null;
+
+  #viewProps;
+
+  constructor(data, otherWidgets = []) {
     this.alignment = data.alignment || "left";
     this.borderStyle = data.borderStyle || "";
     this.buttonAlignX = data.buttonAlignX || 50;
@@ -29,119 +118,256 @@ class Field extends PDFObject {
     this.buttonScaleHow = data.buttonScaleHow;
     this.ButtonScaleWhen = data.buttonScaleWhen;
     this.calcOrderIndex = data.calcOrderIndex;
-    this.charLimit = data.charLimit;
     this.comb = data.comb;
     this.commitOnSelChange = data.commitOnSelChange;
-    this.currentValueIndices = data.currentValueIndices;
     this.defaultStyle = data.defaultStyle;
     this.defaultValue = data.defaultValue;
     this.doNotScroll = data.doNotScroll;
     this.doNotSpellCheck = data.doNotSpellCheck;
     this.delay = data.delay;
-    this.display = data.display;
-    this.doc = data.doc.wrapped;
-    this.editable = data.editable;
+    this.doc = globalThis;
     this.exportValues = data.exportValues;
     this.fileSelect = data.fileSelect;
-    this.hidden = data.hidden;
     this.highlight = data.highlight;
     this.lineWidth = data.lineWidth;
     this.multiline = data.multiline;
-    this.multipleSelection = !!data.multipleSelection;
     this.name = data.name;
     this.password = data.password;
-    this.print = data.print;
     this.radiosInUnison = data.radiosInUnison;
-    this.readonly = data.readonly;
     this.rect = data.rect;
-    this.required = data.required;
     this.richText = data.richText;
     this.richValue = data.richValue;
-    this.rotation = data.rotation;
     this.style = data.style;
     this.submitName = data.submitName;
     this.textFont = data.textFont;
     this.textSize = data.textSize;
     this.type = data.type;
-    this.userName = data.userName;
 
-    // Private
-    this._actions = createActionsMap(data.actions);
-    this._browseForFileToSubmit = data.browseForFileToSubmit || null;
-    this._buttonCaption = null;
-    this._buttonIcon = null;
-    this._children = null;
-    this._currentValueIndices = data.currentValueIndices || 0;
-    this._document = data.doc;
-    this._fieldPath = data.fieldPath;
-    this._fillColor = data.fillColor || ["T"];
-    this._isChoice = Array.isArray(data.items);
-    this._items = data.items || [];
-    this._page = data.page || 0;
-    this._strokeColor = data.strokeColor || ["G", 0];
-    this._textColor = data.textColor || ["G", 0];
-    this._value = data.value || "";
-    this._kidIds = data.kidIds || null;
-    this._fieldType = getFieldType(this._actions);
-    this._siblings = data.siblings || null;
+    this.#actions = createMap(data.actions);
+    this.#appObjects = data.appObjects;
+    this.#browseForFileToSubmit = data.browseForFileToSubmit || null;
+    this.#charLimit = data.charLimit;
+    this.#currentValueIndices = data.currentValueIndices || 0;
+    this.#datetimeFormat = data.datetimeFormat || null;
+    this.#fieldPath = data.fieldPath;
+    this.#fieldType = getFieldType(this.#actions);
+    this.#fillColor = data.fillColor || ["T"];
+    this.#getTerminalChildren = data.getTerminalChildren;
+    this.#globalEval = data.globalEval;
+    this.#hasDateOrTime = !!data.hasDatetimeHTML;
+    this.#hasValue = Object.hasOwn(data, "value");
+    this.#id = data.id;
+    this.#isChoice = Array.isArray(data.items);
+    this.#items = data.items || [];
+    this.#kidIds = data.kidIds || null;
+    this.#page = data.page || 0;
+    this.#rotation = data.rotation || 0;
+    // Fields without widgets still report action errors.
+    this.#send = data.send || (() => {});
+    this.#sendError = data.sendError;
+    this.#strokeColor = data.strokeColor || ["G", 0];
+    this.#textColor = data.textColor || ["G", 0];
+    this.#util = data.util;
+    this.#viewProps = Object.fromEntries(
+      VIEW_PROPERTIES.map(name => [name, data[name]])
+    );
+    this.#viewProps.multipleSelection = !!data.multipleSelection;
 
-    this._globalEval = data.globalEval;
-    this._appObjects = data.appObjects;
+    if (data.type === "radiobutton" || data.type === "checkbox") {
+      // Track each button widget's export value, actions and page.
+      this.#isCheckbox = data.type === "checkbox";
+      this.exportValues = [this.exportValues];
+      this.#radioIds = [this.#id];
+      this.#radioActions = [this.#actions];
+      this.#radioPages = [this.#page];
+      for (const widget of otherWidgets) {
+        this.exportValues.push(widget.exportValues);
+        this.#radioIds.push(widget.id);
+        this.#radioActions.push(createMap(widget.actions));
+        this.#radioPages.push(widget.page || 0);
+        if (data.value === widget.exportValues) {
+          this.#id = widget.id;
+        }
+      }
+      this.#value = data.value || "";
+    } else {
+      if (otherWidgets.length > 0) {
+        this.#otherWidgetIds = otherWidgets.map(widget => widget.id);
+      }
+      this.#setValue(data.value || "");
+    }
 
-    this.valueAsString = data.valueAsString || this._value;
+    if (this.#kidIds) {
+      // Forward assignments to these instance properties to descendants.
+      this.#containerProps = { ...this };
+      containerDescriptors ??= Field.#getContainerDescriptors(
+        Object.keys(this)
+      );
+      Object.defineProperties(this, containerDescriptors);
+    }
+  }
+
+  static #getContainerDescriptors(names) {
+    const descriptors = Object.create(null);
+    for (const name of names) {
+      const descriptor = {
+        get() {
+          return this.#containerProps[name];
+        },
+        set(value) {
+          this.#containerProps[name] = value;
+          this.#setOnKids(name, value);
+        },
+        enumerable: true,
+        configurable: true,
+      };
+      addPublicFunctions(descriptor.get, descriptor.set);
+      descriptors[name] = descriptor;
+    }
+    return descriptors;
+  }
+
+  static {
+    Object.assign(FieldInternals, {
+      getComputedValue: f => f.#originalValue ?? f.#value,
+      getHasValue: f => f.#hasValue,
+      getInitialValue: f => (f.#hasDateOrTime && f.#originalValue) || null,
+      getIsChoice: f => f.#isChoice,
+      getKidIds: f => f.#kidIds,
+      getPageActions: f => f.#getPageActions(),
+      getValue: f => f.#value,
+      // Set the value without updating the view.
+      setValue: (f, value) => f.#setValue(value),
+      // Select the button widget targeted by the event.
+      prepareEvent(f, id, event) {
+        if (f.#radioIds) {
+          f.#id = id;
+          event.value =
+            f.#isCheckbox && !event.value
+              ? "Off"
+              : f.exportValues[f.#checkedIndex];
+          if (event.name === "Action") {
+            f.#value = event.value;
+          }
+        }
+      },
+      runActions: (f, event) => f.#runActions(event),
+      send: (f, data) => f.#sendToView(data),
+    });
+
+    for (const name of VIEW_PROPERTIES) {
+      Object.defineProperty(Field.prototype, name, {
+        get() {
+          return this.#viewProps[name];
+        },
+        set(value) {
+          this.#viewProps[name] = value;
+          this.#update(name, value);
+        },
+        configurable: true,
+      });
+    }
+
+    // As in Acrobat, the field methods can't be overwritten.
+    for (const [name, { value }] of Object.entries(
+      Object.getOwnPropertyDescriptors(Field.prototype)
+    )) {
+      if (name !== "constructor" && typeof value === "function") {
+        Object.defineProperty(Field.prototype, name, { writable: false });
+      }
+    }
+  }
+
+  get #siblings() {
+    return (
+      this.#radioIds?.filter(id => id !== this.#id) ?? this.#otherWidgetIds
+    );
+  }
+
+  /**
+   * @returns {Array<[number, string, Array<string>]>} Page index, event name,
+   *   and scripts for each PageOpen/PageClose chain.
+   */
+  #getPageActions() {
+    // Collect each widget's chain, including inherited actions.
+    const actions = this.#radioActions ?? [this.#actions];
+    const pages = this.#radioPages ?? [this.#page];
+    const pageActions = [];
+    for (let i = 0, ii = actions.length; i < ii; i++) {
+      for (const eventName of ["PageOpen", "PageClose"]) {
+        const scripts = actions[i].get(eventName);
+        if (scripts) {
+          pageActions.push([pages[i], eventName, scripts]);
+        }
+      }
+    }
+    return pageActions;
+  }
+
+  #setOnKids(name, value) {
+    // Forward built-in property assignments; child setters handle recursion.
+    if (this.#kidIds) {
+      for (const id of this.#kidIds) {
+        const kid = this.#appObjects[id];
+        if (kid) {
+          kid[name] = value;
+        }
+      }
+    }
+  }
+
+  // Update the view of the current widget and of its siblings.
+  #sendToView(data) {
+    const siblings = this.#siblings;
+    this.#send(
+      siblings ? { id: this.#id, siblings, ...data } : { id: this.#id, ...data }
+    );
+  }
+
+  #update(name, value, sentValue = value) {
+    this.#setOnKids(name, value);
+    this.#sendToView({ [name]: sentValue });
   }
 
   get currentValueIndices() {
-    if (!this._isChoice) {
-      return 0;
-    }
-    return this._currentValueIndices;
+    return !this.#isChoice ? 0 : this.#currentValueIndices;
   }
 
   set currentValueIndices(indices) {
-    if (!this._isChoice) {
+    this.#setOnKids("currentValueIndices", indices);
+    if (!this.#isChoice) {
       return;
     }
     if (!Array.isArray(indices)) {
       indices = [indices];
     }
     if (
-      !indices.every(
-        i =>
-          typeof i === "number" &&
-          Number.isInteger(i) &&
-          i >= 0 &&
-          i < this.numItems
-      )
+      !indices.every(i => Number.isInteger(i) && i >= 0 && i < this.numItems)
     ) {
       return;
     }
 
-    indices.sort();
+    indices.sort((a, b) => a - b);
 
-    if (this.multipleSelection) {
-      this._currentValueIndices = indices;
-      this._value = [];
-      indices.forEach(i => {
-        this._value.push(this._items[i].displayValue);
-      });
-    } else {
-      if (indices.length > 0) {
-        indices = indices.splice(1, indices.length - 1);
-        this._currentValueIndices = indices[0];
-        this._value = this._items[this._currentValueIndices];
-      }
+    if (this.#viewProps.multipleSelection) {
+      this.#currentValueIndices = indices;
+      this.#value = indices.map(i => this.#items[i].exportValue);
+    } else if (indices.length > 0) {
+      indices = [indices[0]];
+      this.#currentValueIndices = indices[0];
+      this.#value = this.#items[indices[0]].exportValue;
     }
-    this._send({ id: this._id, indices });
+    this.#send({ id: this.#id, indices });
   }
 
   get fillColor() {
-    return this._fillColor;
+    return this.#fillColor;
   }
 
   set fillColor(color) {
-    if (Color._isValidColor(color)) {
-      this._fillColor = color;
+    if (isValidColor(color)) {
+      this.#fillColor = color;
+      this.#update("fillColor", color);
     }
   }
 
@@ -153,11 +379,23 @@ class Field extends PDFObject {
     this.fillColor = color;
   }
 
+  get charLimit() {
+    return this.#charLimit;
+  }
+
+  set charLimit(limit) {
+    if (typeof limit !== "number") {
+      throw new Error("Invalid argument value");
+    }
+    this.#charLimit = Math.max(0, Math.floor(limit));
+    this.#update("charLimit", this.#charLimit);
+  }
+
   get numItems() {
-    if (!this._isChoice) {
+    if (!this.#isChoice) {
       throw new Error("Not a choice widget");
     }
-    return this._items.length;
+    return this.#items.length;
   }
 
   set numItems(_) {
@@ -165,12 +403,13 @@ class Field extends PDFObject {
   }
 
   get strokeColor() {
-    return this._strokeColor;
+    return this.#strokeColor;
   }
 
   set strokeColor(color) {
-    if (Color._isValidColor(color)) {
-      this._strokeColor = color;
+    if (isValidColor(color)) {
+      this.#strokeColor = color;
+      this.#update("strokeColor", color);
     }
   }
 
@@ -183,20 +422,38 @@ class Field extends PDFObject {
   }
 
   get page() {
-    return this._page;
+    return this.#page;
   }
 
   set page(_) {
     throw new Error("field.page is read-only");
   }
 
+  get rotation() {
+    return this.#rotation;
+  }
+
+  set rotation(angle) {
+    angle = Math.floor(angle);
+    if (angle % 90 !== 0) {
+      throw new Error("Invalid rotation: must be a multiple of 90");
+    }
+    angle %= 360;
+    if (angle < 0) {
+      angle += 360;
+    }
+    this.#rotation = angle;
+    this.#update("rotation", angle);
+  }
+
   get textColor() {
-    return this._textColor;
+    return this.#textColor;
   }
 
   set textColor(color) {
-    if (Color._isValidColor(color)) {
-      this._textColor = color;
+    if (isValidColor(color)) {
+      this.#textColor = color;
+      this.#update("textColor", color);
     }
   }
 
@@ -209,76 +466,155 @@ class Field extends PDFObject {
   }
 
   get value() {
-    return this._value;
+    return this.#value;
   }
 
   set value(value) {
-    if (value === "") {
-      this._value = "";
-    } else if (typeof value === "string") {
-      switch (this._fieldType) {
-        case FieldType.number:
-        case FieldType.percent:
-          value = parseFloat(value);
-          if (!isNaN(value)) {
-            this._value = value;
-          }
-          break;
-        default:
-          this._value = value;
-      }
-    } else {
-      this._value = value;
+    if (this.#setValue(value)) {
+      this.#update("value", value, this.#originalValue ?? this.#value);
     }
-    if (this._isChoice) {
-      if (this.multipleSelection) {
-        const values = new Set(value);
-        this._currentValueIndices.length = 0;
-        this._items.forEach(({ displayValue }, i) => {
-          if (values.has(displayValue)) {
-            this._currentValueIndices.push(i);
-          }
-        });
+  }
+
+  // Return false for unsupported radio-button values.
+  #setValue(value) {
+    if (this.#radioIds) {
+      return this.#setRadioValue(value);
+    }
+    if (this.#isChoice) {
+      this.#setChoiceValue(value);
+      return true;
+    }
+
+    if (this.#hasDateOrTime && value) {
+      const date = this.#util.scand(this.#datetimeFormat, value);
+      if (date) {
+        this.#originalValue = date.valueOf();
+        value = this.#util.printd(this.#datetimeFormat, date);
+        this.#value = !isNaN(value) ? parseFloat(value) : value;
+        return true;
+      }
+    }
+
+    if (
+      value === "" ||
+      typeof value !== "string" ||
+      // Preserve strings for date and time fields instead of parsing numbers.
+      this.#fieldType >= FieldType.date
+    ) {
+      this.#originalValue = undefined;
+      this.#value = value;
+      return true;
+    }
+
+    this.#originalValue = value;
+    const _value = value.trim().replace(",", ".");
+    this.#value = !isNaN(_value) ? parseFloat(_value) : value;
+    return true;
+  }
+
+  get #checkedIndex() {
+    return this.#radioIds.indexOf(this.#id);
+  }
+
+  #getWidgetIndex(nWidget) {
+    if (!this.#radioIds) {
+      return -1;
+    }
+    // Accept integer indices and their canonical string forms.
+    const index = Number(nWidget);
+    return Number.isInteger(index) &&
+      index >= 0 &&
+      index < this.#radioIds.length &&
+      `${index}` === `${nWidget}`
+      ? index
+      : -1;
+  }
+
+  #check(index, value) {
+    this.#id = this.#radioIds[index];
+    this.#value = value;
+  }
+
+  #setRadioValue(value) {
+    // Non-export values uncheck the checkbox.
+    if (
+      this.#isCheckbox &&
+      (!value || value === "Off" || !this.exportValues.includes(value))
+    ) {
+      this.#value = "Off";
+      return true;
+    }
+    if (value === null || value === undefined) {
+      this.#value = "";
+      return true;
+    }
+    const i = this.exportValues.indexOf(value);
+    if (i !== -1) {
+      this.#check(i, value);
+      return true;
+    }
+    if (value === "Off" && this.#radioIds.length === 2) {
+      const nextI = (1 + this.#checkedIndex) % 2;
+      this.#check(nextI, this.exportValues[nextI]);
+      return true;
+    }
+    return false;
+  }
+
+  #setChoiceValue(value) {
+    if (this.#viewProps.multipleSelection) {
+      if (!Array.isArray(value)) {
+        value = [value];
+      }
+      const values = new Set(value);
+      if (Array.isArray(this.#currentValueIndices)) {
+        this.#currentValueIndices.length = 0;
+        this.#value.length = 0;
       } else {
-        this._currentValueIndices = this._items.findIndex(
-          ({ displayValue }) => value === displayValue
-        );
+        this.#currentValueIndices = [];
+        this.#value = [];
+      }
+      this.#items.forEach((item, i) => {
+        if (values.has(item.exportValue)) {
+          this.#currentValueIndices.push(i);
+          this.#value.push(item.exportValue);
+        }
+      });
+    } else {
+      if (Array.isArray(value)) {
+        value = value[0];
+      }
+      const index = this.#items.findIndex(
+        ({ exportValue }) => value === exportValue
+      );
+      if (index !== -1) {
+        this.#currentValueIndices = index;
+        this.#value = this.#items[index].exportValue;
       }
     }
   }
 
   get valueAsString() {
-    if (this._valueAsString === undefined) {
-      this._valueAsString = this._value ? this._value.toString() : "";
-    }
-    return this._valueAsString;
+    return (this.#value ?? "").toString();
   }
 
-  set valueAsString(val) {
-    this._valueAsString = val ? val.toString() : "";
+  set valueAsString(_) {
+    // Do nothing.
   }
 
   browseForFileToSubmit() {
-    if (this._browseForFileToSubmit) {
-      // TODO: implement this function on Firefox side
-      // we can use nsIFilePicker but open method is async.
-      // Maybe it's possible to use a html input (type=file) too.
-      this._browseForFileToSubmit();
+    if (this.#browseForFileToSubmit) {
+      // TODO: Implement a file picker.
+      this.#browseForFileToSubmit();
     }
   }
 
   buttonGetCaption(nFace = 0) {
-    if (this._buttonCaption) {
-      return this._buttonCaption[nFace];
-    }
-    return "";
+    return this.#buttonCaption ? this.#buttonCaption[nFace] : "";
   }
 
   buttonGetIcon(nFace = 0) {
-    if (this._buttonIcon) {
-      return this._buttonIcon[nFace];
-    }
-    return null;
+    return this.#buttonIcon ? this.#buttonIcon[nFace] : null;
   }
 
   buttonImportIcon(cPath = null, nPave = 0) {
@@ -286,35 +622,36 @@ class Field extends PDFObject {
   }
 
   buttonSetCaption(cCaption, nFace = 0) {
-    if (!this._buttonCaption) {
-      this._buttonCaption = ["", "", ""];
-    }
-    this._buttonCaption[nFace] = cCaption;
-    // TODO: send to the annotation layer
-    // Right now the button is drawn on the canvas using its appearance so
-    // update the caption means redraw...
-    // We should probably have an html button for this annotation.
+    this.#buttonCaption ??= ["", "", ""];
+    this.#buttonCaption[nFace] = cCaption;
+    // TODO: Update the button's appearance in the annotation layer.
   }
 
   buttonSetIcon(oIcon, nFace = 0) {
-    if (!this._buttonIcon) {
-      this._buttonIcon = [null, null, null];
-    }
-    this._buttonIcon[nFace] = oIcon;
+    this.#buttonIcon ??= [null, null, null];
+    this.#buttonIcon[nFace] = oIcon;
   }
 
-  checkThisBox(nWidget, bCheckIt = true) {}
+  checkThisBox(nWidget, bCheckIt = true) {
+    const index = this.#getWidgetIndex(nWidget);
+    if (index === -1 || (!bCheckIt && !this.#isCheckbox)) {
+      return;
+    }
+    const value = bCheckIt ? this.exportValues[index] : "Off";
+    this.#check(index, value);
+    this.#send({ id: this.#id, value });
+  }
 
   clearItems() {
-    if (!this._isChoice) {
+    if (!this.#isChoice) {
       throw new Error("Not a choice widget");
     }
-    this._items = [];
-    this._send({ id: this._id, clear: null });
+    this.#items = [];
+    this.#send({ id: this.#id, clear: null });
   }
 
   deleteItemAt(nIdx = null) {
-    if (!this._isChoice) {
+    if (!this.#isChoice) {
       throw new Error("Not a choice widget");
     }
     if (!this.numItems) {
@@ -323,58 +660,70 @@ class Field extends PDFObject {
 
     if (nIdx === null) {
       // Current selected item.
-      nIdx = Array.isArray(this._currentValueIndices)
-        ? this._currentValueIndices[0]
-        : this._currentValueIndices;
-      nIdx = nIdx || 0;
+      nIdx = Array.isArray(this.#currentValueIndices)
+        ? this.#currentValueIndices[0]
+        : this.#currentValueIndices;
+      nIdx ||= 0;
     }
 
     if (nIdx < 0 || nIdx >= this.numItems) {
       nIdx = this.numItems - 1;
     }
 
-    this._items.splice(nIdx, 1);
-    if (Array.isArray(this._currentValueIndices)) {
-      let index = this._currentValueIndices.findIndex(i => i >= nIdx);
+    this.#items.splice(nIdx, 1);
+    if (Array.isArray(this.#currentValueIndices)) {
+      let index = this.#currentValueIndices.findIndex(i => i >= nIdx);
       if (index !== -1) {
-        if (this._currentValueIndices[index] === nIdx) {
-          this._currentValueIndices.splice(index, 1);
+        if (this.#currentValueIndices[index] === nIdx) {
+          this.#currentValueIndices.splice(index, 1);
         }
-        for (const ii = this._currentValueIndices.length; index < ii; index++) {
-          --this._currentValueIndices[index];
+        for (const ii = this.#currentValueIndices.length; index < ii; index++) {
+          --this.#currentValueIndices[index];
         }
       }
-    } else {
-      if (this._currentValueIndices === nIdx) {
-        this._currentValueIndices = this.numItems > 0 ? 0 : -1;
-      } else if (this._currentValueIndices > nIdx) {
-        --this._currentValueIndices;
-      }
+    } else if (this.#currentValueIndices === nIdx) {
+      this.#currentValueIndices = this.numItems > 0 ? 0 : -1;
+    } else if (this.#currentValueIndices > nIdx) {
+      --this.#currentValueIndices;
     }
 
-    this._send({ id: this._id, remove: nIdx });
+    this.#send({ id: this.#id, remove: nIdx });
   }
 
   getItemAt(nIdx = -1, bExportValue = false) {
-    if (!this._isChoice) {
+    if (!this.#isChoice) {
       throw new Error("Not a choice widget");
     }
     if (nIdx < 0 || nIdx >= this.numItems) {
       nIdx = this.numItems - 1;
     }
-    const item = this._items[nIdx];
+    const item = this.#items[nIdx];
     return bExportValue ? item.exportValue : item.displayValue;
   }
 
   getArray() {
-    if (this._kidIds) {
-      return this._kidIds.map(id => this._appObjects[id].wrapped);
+    // Return fields with values from this subtree.
+    if (this.#kidIds) {
+      const array = [];
+      const fillArrayWithKids = kidIds => {
+        for (const id of kidIds) {
+          const obj = this.#appObjects[id];
+          if (!obj) {
+            continue;
+          }
+          if (obj.#hasValue) {
+            array.push(obj);
+          }
+          if (obj.#kidIds) {
+            fillArrayWithKids(obj.#kidIds);
+          }
+        }
+      };
+      fillArrayWithKids(this.#kidIds);
+      return array;
     }
 
-    if (this._children === null) {
-      this._children = this._document.obj._getChildren(this._fieldPath);
-    }
-    return this._children;
+    return (this.#children ??= this.#getTerminalChildren(this.#fieldPath));
   }
 
   getLock() {
@@ -382,15 +731,22 @@ class Field extends PDFObject {
   }
 
   isBoxChecked(nWidget) {
-    return false;
+    const index = this.#getWidgetIndex(nWidget);
+    // A current widget ID does not imply that it is checked.
+    return (
+      index !== -1 &&
+      this.#id === this.#radioIds[index] &&
+      this.#value === this.exportValues[index]
+    );
   }
 
   isDefaultChecked(nWidget) {
-    return false;
+    const index = this.#getWidgetIndex(nWidget);
+    return index !== -1 && this.defaultValue === this.exportValues[index];
   }
 
   insertItemAt(cName, cExport = undefined, nIdx = 0) {
-    if (!this._isChoice) {
+    if (!this.#isChoice) {
       throw new Error("Not a choice widget");
     }
     if (!cName) {
@@ -401,7 +757,7 @@ class Field extends PDFObject {
       nIdx = this.numItems;
     }
 
-    if (this._items.some(({ displayValue }) => displayValue === cName)) {
+    if (this.#items.some(({ displayValue }) => displayValue === cName)) {
       return;
     }
 
@@ -409,40 +765,37 @@ class Field extends PDFObject {
       cExport = cName;
     }
     const data = { displayValue: cName, exportValue: cExport };
-    this._items.splice(nIdx, 0, data);
-    if (Array.isArray(this._currentValueIndices)) {
-      let index = this._currentValueIndices.findIndex(i => i >= nIdx);
+    this.#items.splice(nIdx, 0, data);
+    if (Array.isArray(this.#currentValueIndices)) {
+      let index = this.#currentValueIndices.findIndex(i => i >= nIdx);
       if (index !== -1) {
-        for (const ii = this._currentValueIndices.length; index < ii; index++) {
-          ++this._currentValueIndices[index];
+        for (const ii = this.#currentValueIndices.length; index < ii; index++) {
+          ++this.#currentValueIndices[index];
         }
       }
-    } else if (this._currentValueIndices >= nIdx) {
-      ++this._currentValueIndices;
+    } else if (this.#currentValueIndices >= nIdx) {
+      ++this.#currentValueIndices;
     }
 
-    this._send({ id: this._id, insert: { index: nIdx, ...data } });
+    this.#send({ id: this.#id, insert: { index: nIdx, ...data } });
   }
 
   setAction(cTrigger, cScript) {
     if (typeof cTrigger !== "string" || typeof cScript !== "string") {
       return;
     }
-    if (!(cTrigger in this._actions)) {
-      this._actions[cTrigger] = [];
-    }
-    this._actions[cTrigger].push(cScript);
+    this.#actions.getOrInsertComputed(cTrigger, makeArr).push(cScript);
   }
 
   setFocus() {
-    this._send({ id: this._id, focus: true });
+    this.#send({ id: this.#id, focus: true });
   }
 
   setItems(oArray) {
-    if (!this._isChoice) {
+    if (!this.#isChoice) {
       throw new Error("Not a choice widget");
     }
-    this._items.length = 0;
+    this.#items.length = 0;
     for (const element of oArray) {
       let displayValue, exportValue;
       if (Array.isArray(element)) {
@@ -451,11 +804,11 @@ class Field extends PDFObject {
       } else {
         displayValue = exportValue = element?.toString() || "";
       }
-      this._items.push({ displayValue, exportValue });
+      this.#items.push({ displayValue, exportValue });
     }
-    this._currentValueIndices = 0;
+    this.#currentValueIndices = 0;
 
-    this._send({ id: this._id, items: this._items });
+    this.#send({ id: this.#id, items: this.#items });
   }
 
   setLock() {}
@@ -472,149 +825,33 @@ class Field extends PDFObject {
 
   signatureValidate() {}
 
-  _isButton() {
-    return false;
-  }
-
-  _runActions(event) {
+  #runActions(event) {
+    if (this.#radioIds) {
+      // Use the current widget's actions, even if it is unchecked.
+      this.#actions = this.#radioActions[this.#checkedIndex];
+    }
     const eventName = event.name;
-    if (!this._actions.has(eventName)) {
+    const actions = this.#actions.get(eventName);
+    if (!actions) {
       return false;
     }
 
-    const actions = this._actions.get(eventName);
-    try {
-      for (const action of actions) {
-        // Action evaluation must happen in the global scope
-        this._globalEval(action);
+    for (const action of actions) {
+      try {
+        // Evaluate actions in the global scope.
+        this.#globalEval(action);
+      } catch (error) {
+        this.#sendError(
+          serializeError(
+            error,
+            `Error when executing "${eventName}" for field "${this.#id}"\n`
+          )
+        );
       }
-    } catch (error) {
-      event.rc = false;
-      throw error;
     }
 
     return true;
   }
 }
 
-class RadioButtonField extends Field {
-  constructor(otherButtons, data) {
-    super(data);
-
-    this.exportValues = [this.exportValues];
-    this._radioIds = [this._id];
-    this._radioActions = [this._actions];
-
-    for (const radioData of otherButtons) {
-      this.exportValues.push(radioData.exportValues);
-      this._radioIds.push(radioData.id);
-      this._radioActions.push(createActionsMap(radioData.actions));
-      if (this._value === radioData.exportValues) {
-        this._id = radioData.id;
-      }
-    }
-  }
-
-  get value() {
-    return this._value;
-  }
-
-  set value(value) {
-    if (value === null || value === undefined) {
-      this._value = "";
-    }
-    const i = this.exportValues.indexOf(value);
-    if (0 <= i && i < this._radioIds.length) {
-      this._id = this._radioIds[i];
-      this._value = value;
-    } else if (value === "Off" && this._radioIds.length === 2) {
-      const nextI = (1 + this._radioIds.indexOf(this._id)) % 2;
-      this._id = this._radioIds[nextI];
-      this._value = this.exportValues[nextI];
-    }
-  }
-
-  checkThisBox(nWidget, bCheckIt = true) {
-    if (nWidget < 0 || nWidget >= this._radioIds.length || !bCheckIt) {
-      return;
-    }
-
-    this._id = this._radioIds[nWidget];
-    this._value = this.exportValues[nWidget];
-    this._send({ id: this._id, value: this._value });
-  }
-
-  isBoxChecked(nWidget) {
-    return (
-      nWidget >= 0 &&
-      nWidget < this._radioIds.length &&
-      this._id === this._radioIds[nWidget]
-    );
-  }
-
-  isDefaultChecked(nWidget) {
-    return (
-      nWidget >= 0 &&
-      nWidget < this.exportValues.length &&
-      this.defaultValue === this.exportValues[nWidget]
-    );
-  }
-
-  _getExportValue(state) {
-    const i = this._radioIds.indexOf(this._id);
-    return this.exportValues[i];
-  }
-
-  _runActions(event) {
-    const i = this._radioIds.indexOf(this._id);
-    this._actions = this._radioActions[i];
-    return super._runActions(event);
-  }
-
-  _isButton() {
-    return true;
-  }
-}
-
-class CheckboxField extends RadioButtonField {
-  get value() {
-    return this._value;
-  }
-
-  set value(value) {
-    if (!value || value === "Off") {
-      this._value = "Off";
-    } else {
-      super.value = value;
-    }
-  }
-
-  _getExportValue(state) {
-    return state ? super._getExportValue(state) : "Off";
-  }
-
-  isBoxChecked(nWidget) {
-    if (this._value === "Off") {
-      return false;
-    }
-    return super.isBoxChecked(nWidget);
-  }
-
-  isDefaultChecked(nWidget) {
-    if (this.defaultValue === "Off") {
-      return this._value === "Off";
-    }
-    return super.isDefaultChecked(nWidget);
-  }
-
-  checkThisBox(nWidget, bCheckIt = true) {
-    if (nWidget < 0 || nWidget >= this._radioIds.length) {
-      return;
-    }
-    this._id = this._radioIds[nWidget];
-    this._value = bCheckIt ? this.exportValues[nWidget] : "Off";
-    this._send({ id: this._id, value: this._value });
-  }
-}
-
-export { CheckboxField, Field, RadioButtonField };
+export { Field, FieldInternals };

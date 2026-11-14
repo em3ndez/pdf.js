@@ -13,39 +13,131 @@
  * limitations under the License.
  */
 
-import "../external/webL10n/l10n.js";
-import { fixupLangCode, getL10nFallback } from "./l10n_utils.js";
+import { FeatureTest, fetchData } from "pdfjs-lib";
+import { FluentBundle, FluentResource } from "fluent-bundle";
+import { DOMLocalization } from "fluent-dom";
+import { L10n } from "./l10n.js";
 
-const webL10n = document.webL10n;
+function PLATFORM() {
+  const { isAndroid, isLinux, isMac, isWindows } = FeatureTest.platform;
+  if (isLinux) {
+    return "linux";
+  }
+  if (isWindows) {
+    return "windows";
+  }
+  if (isMac) {
+    return "macos";
+  }
+  return isAndroid ? "android" : "other";
+}
 
-class GenericL10n {
+function createBundle(lang, text) {
+  const resource = new FluentResource(text);
+  const bundle = new FluentBundle(lang, {
+    functions: { PLATFORM },
+  });
+  const errors = bundle.addResource(resource);
+  if (errors.length) {
+    console.error("L10n errors", errors);
+  }
+  return bundle;
+}
+
+class GenericL10n extends L10n {
   constructor(lang) {
-    this._lang = lang;
-    this._ready = new Promise((resolve, reject) => {
-      webL10n.setLanguage(fixupLangCode(lang), () => {
-        resolve(webL10n);
-      });
-    });
+    super({ lang });
+
+    const generateBundles = !lang
+      ? GenericL10n.#generateBundlesFallback.bind(
+          GenericL10n,
+          this.getLanguage()
+        )
+      : GenericL10n.#generateBundles.bind(
+          GenericL10n,
+          "en-us",
+          this.getLanguage()
+        );
+    this._setL10n(new DOMLocalization([], generateBundles));
   }
 
-  async getLanguage() {
-    const l10n = await this._ready;
-    return l10n.getLanguage();
+  /**
+   * Generate the bundles for Fluent.
+   * @param {string} defaultLang - The fallback language to use for
+   *   translations.
+   * @param {string} baseLang - The base language to use for translations.
+   */
+  static async *#generateBundles(defaultLang, baseLang) {
+    const { baseURL, paths } = await this.#getPaths();
+
+    const langs = [baseLang];
+    if (defaultLang !== baseLang) {
+      // Also fallback to the short-format of the base language
+      // (see issue 17269).
+      const shortLang = baseLang.split("-", 1)[0];
+
+      if (shortLang !== baseLang) {
+        langs.push(shortLang);
+      }
+      langs.push(defaultLang);
+    }
+    // Trigger fetching of bundles in parallel, to reduce overall load time.
+    const bundles = langs.map(lang => [
+      lang,
+      this.#createBundle(lang, baseURL, paths),
+    ]);
+
+    for (const [lang, bundlePromise] of bundles) {
+      const bundle = await bundlePromise;
+      if (bundle) {
+        yield bundle;
+      } else if (lang === "en-us") {
+        yield this.#createBundleFallback(lang);
+      }
+    }
   }
 
-  async getDirection() {
-    const l10n = await this._ready;
-    return l10n.getDirection();
+  static async #createBundle(lang, baseURL, paths) {
+    const path = paths[lang];
+    if (!path) {
+      return null;
+    }
+    const url = new URL(path, baseURL);
+    const text = await fetchData(url, /* type = */ "text");
+
+    return createBundle(lang, text);
   }
 
-  async get(key, args = null, fallback = getL10nFallback(key, args)) {
-    const l10n = await this._ready;
-    return l10n.get(key, args, fallback);
+  static async #getPaths() {
+    try {
+      const { href } = document.querySelector(`link[type="application/l10n"]`);
+      const paths = await fetchData(href, /* type = */ "json");
+
+      return {
+        baseURL: href.substring(0, href.lastIndexOf("/") + 1) || "./",
+        paths,
+      };
+    } catch {}
+    return { baseURL: "./", paths: Object.create(null) };
   }
 
-  async translate(element) {
-    const l10n = await this._ready;
-    return l10n.translate(element);
+  static async *#generateBundlesFallback(lang) {
+    yield this.#createBundleFallback(lang);
+  }
+
+  static async #createBundleFallback(lang) {
+    if (typeof PDFJSDev !== "undefined" && PDFJSDev.test("TESTING")) {
+      throw new Error("Not implemented: #createBundleFallback");
+    }
+    const text =
+      typeof PDFJSDev === "undefined"
+        ? await fetchData(
+            new URL("../l10n/en-US/viewer.ftl", window.location.href),
+            /* type = */ "text"
+          )
+        : PDFJSDev.eval("DEFAULT_FTL");
+
+    return createBundle(lang, text);
   }
 }
 

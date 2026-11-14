@@ -13,7 +13,8 @@
  * limitations under the License.
  */
 
-import { Dict, isStream, Ref, RefSet } from "./primitives.js";
+import { Dict, Ref, RefSet } from "./primitives.js";
+import { BaseStream } from "./base_stream.js";
 import { MissingDataException } from "./core_utils.js";
 import { warn } from "../shared/util.js";
 
@@ -21,15 +22,15 @@ function mayHaveChildren(value) {
   return (
     value instanceof Ref ||
     value instanceof Dict ||
-    Array.isArray(value) ||
-    isStream(value)
+    value instanceof BaseStream ||
+    Array.isArray(value)
   );
 }
 
 function addChildren(node, nodesToVisit) {
   if (node instanceof Dict) {
     node = node.getRawValues();
-  } else if (isStream(node)) {
+  } else if (node instanceof BaseStream) {
     node = node.dict.getRawValues();
   } else if (!Array.isArray(node)) {
     return;
@@ -53,34 +54,31 @@ function addChildren(node, nodesToVisit) {
  * entire PDF document object graph to be traversed.
  */
 class ObjectLoader {
+  refSet = new RefSet();
+
   constructor(dict, keys, xref) {
     this.dict = dict;
     this.keys = keys;
     this.xref = xref;
-    this.refSet = null;
   }
 
   async load() {
-    // Don't walk the graph if all the data is already loaded.
-    if (this.xref.stream.isDataLoaded) {
-      return undefined;
-    }
-
     const { keys, dict } = this;
-    this.refSet = new RefSet();
     // Setup the initial nodes to visit.
     const nodesToVisit = [];
-    for (let i = 0, ii = keys.length; i < ii; i++) {
-      const rawValue = dict.getRaw(keys[i]);
+    for (const key of keys) {
+      const rawValue = dict.getRaw(key);
       // Skip nodes that are guaranteed to be empty.
       if (rawValue !== undefined) {
         nodesToVisit.push(rawValue);
       }
     }
-    return this._walk(nodesToVisit);
+    await this.#walk(nodesToVisit);
+
+    this.refSet = null; // Everything is loaded, clear the cache.
   }
 
-  async _walk(nodesToVisit) {
+  async #walk(nodesToVisit) {
     const nodesToRevisit = [];
     const pendingRequests = [];
     // DFS walk of the object graph.
@@ -98,17 +96,16 @@ class ObjectLoader {
           currentNode = this.xref.fetch(currentNode);
         } catch (ex) {
           if (!(ex instanceof MissingDataException)) {
-            warn(`ObjectLoader._walk - requesting all data: "${ex}".`);
-            this.refSet = null;
+            warn(`ObjectLoader.#walk - requesting all data: "${ex}".`);
 
-            const { manager } = this.xref.stream;
-            return manager.requestAllChunks();
+            await this.xref.stream.manager.requestAllChunks();
+            return;
           }
           nodesToRevisit.push(currentNode);
           pendingRequests.push({ begin: ex.begin, end: ex.end });
         }
       }
-      if (isStream(currentNode)) {
+      if (currentNode instanceof BaseStream) {
         const baseStreams = currentNode.getBaseStreams();
         if (baseStreams) {
           let foundMissingData = false;
@@ -138,11 +135,18 @@ class ObjectLoader {
           this.refSet.remove(node);
         }
       }
-      return this._walk(nodesToRevisit);
+      await this.#walk(nodesToRevisit);
     }
-    // Everything is loaded.
-    this.refSet = null;
-    return undefined;
+  }
+
+  static async load(obj, keys, xref) {
+    // Don't walk the graph if all the data is already loaded.
+    if (xref.stream.isDataLoaded) {
+      return;
+    }
+    // eslint-disable-next-line no-restricted-syntax
+    const objLoader = new ObjectLoader(obj, keys, xref);
+    await objLoader.load();
   }
 }
 

@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 
+import { noopFn, unreachable } from "../shared/util.js";
 import { BaseStream } from "./base_stream.js";
 import { Stream } from "./stream.js";
 
@@ -24,21 +25,30 @@ const emptyBuffer = new Uint8Array(0);
 
 // Super class for the decoding streams.
 class DecodeStream extends BaseStream {
+  buffer = emptyBuffer;
+
+  bufferLength = 0;
+
+  eof = false;
+
+  minBufferLength = 512;
+
+  pos = 0;
+
   constructor(maybeMinBufferLength) {
     super();
     this._rawMinBufferLength = maybeMinBufferLength || 0;
 
-    this.pos = 0;
-    this.bufferLength = 0;
-    this.eof = false;
-    this.buffer = emptyBuffer;
-    this.minBufferLength = 512;
     if (maybeMinBufferLength) {
       // Compute the first power of two that is as big as maybeMinBufferLength.
       while (this.minBufferLength < maybeMinBufferLength) {
         this.minBufferLength *= 2;
       }
     }
+  }
+
+  readBlock() {
+    unreachable("Abstract method `readBlock` called");
   }
 
   get isEmpty() {
@@ -73,7 +83,7 @@ class DecodeStream extends BaseStream {
     return this.buffer[this.pos++];
   }
 
-  getBytes(length, forceClamped = false) {
+  getBytes(length, decoderOptions = null) {
     const pos = this.pos;
     let end;
 
@@ -82,7 +92,7 @@ class DecodeStream extends BaseStream {
       end = pos + length;
 
       while (!this.eof && this.bufferLength < end) {
-        this.readBlock();
+        this.readBlock(decoderOptions);
       }
       const bufEnd = this.bufferLength;
       if (end > bufEnd) {
@@ -90,17 +100,68 @@ class DecodeStream extends BaseStream {
       }
     } else {
       while (!this.eof) {
-        this.readBlock();
+        this.readBlock(decoderOptions);
       }
       end = this.bufferLength;
     }
 
     this.pos = end;
-    const subarray = this.buffer.subarray(pos, end);
-    // `this.buffer` is either a `Uint8Array` or `Uint8ClampedArray` here.
-    return forceClamped && !(subarray instanceof Uint8ClampedArray)
-      ? new Uint8ClampedArray(subarray)
-      : subarray;
+    return this.buffer.subarray(pos, end);
+  }
+
+  async getImageData(length, decoderOptions) {
+    if (!this.canAsyncDecodeImageFromBuffer) {
+      return this.isAsyncDecoder
+        ? this.decodeImage(null, length, decoderOptions)
+        : this.getBytes(length, decoderOptions);
+    }
+    const data = await this.stream.asyncGetBytes();
+    return this.decodeImage(data, length, decoderOptions);
+  }
+
+  async asyncGetBytesFromDecompressionStream(name) {
+    this.stream.reset();
+    const bytes =
+      (this.stream.isAsync && (await this.stream.asyncGetBytes())) ||
+      this.stream.getBytes();
+
+    try {
+      const { readable, writable } = new DecompressionStream(name);
+      const writer = writable.getWriter();
+      // Don't await the writer: it only makes progress once the reader pulls.
+      // close() is queued behind write(), so the stream is only closed once
+      // all the bytes have been written.
+      // Handle decompression errors through reader.read() below.
+      writer.write(bytes).catch(noopFn);
+      writer.close().catch(noopFn);
+
+      const chunks = [];
+      let totalLength = 0;
+
+      // Faster than `for await`.
+      const reader = readable.getReader();
+      while (true) {
+        const { value: chunk, done } = await reader.read();
+        if (done) {
+          break;
+        }
+        chunks.push(chunk);
+        totalLength += chunk.byteLength;
+      }
+      // Avoid copying single-chunk output.
+      if (chunks.length === 1) {
+        return { decompressed: chunks[0], compressed: bytes };
+      }
+      const data = new Uint8Array(totalLength);
+      let offset = 0;
+      for (const chunk of chunks) {
+        data.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return { decompressed: data, compressed: bytes };
+    } catch {
+      return { decompressed: null, compressed: bytes };
+    }
   }
 
   reset() {
@@ -121,13 +182,23 @@ class DecodeStream extends BaseStream {
     return new Stream(this.buffer, start, length, dict);
   }
 
+  clone() {
+    // Make sure it has been fully read.
+    while (!this.eof) {
+      this.readBlock();
+    }
+    return new Stream(this.buffer, 0, this.bufferLength, this.dict?.clone());
+  }
+
   getBaseStreams() {
-    return this.str ? this.str.getBaseStreams() : null;
+    return this.stream ? this.stream.getBaseStreams() : null;
   }
 }
 
 class StreamsSequenceStream extends DecodeStream {
   constructor(streams, onError = null) {
+    streams = streams.filter(s => s instanceof BaseStream && !s.isImageStream);
+
     let maybeLength = 0;
     for (const stream of streams) {
       maybeLength +=
@@ -153,15 +224,18 @@ class StreamsSequenceStream extends DecodeStream {
       chunk = stream.getBytes();
     } catch (reason) {
       if (this._onError) {
-        this._onError(reason, stream.dict && stream.dict.objId);
+        this._onError(reason, stream.dict?.objId);
         return;
       }
       throw reason;
     }
     const bufferLength = this.bufferLength;
-    const newLength = bufferLength + chunk.length;
+    // Add a line feed after each stream, so that a token or a comment cannot
+    // continue into the next one.
+    const newLength = bufferLength + chunk.length + 1;
     const buffer = this.ensureBuffer(newLength);
     buffer.set(chunk, bufferLength);
+    buffer[newLength - 1] = 0x0a;
     this.bufferLength = newLength;
   }
 

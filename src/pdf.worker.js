@@ -15,9 +15,8 @@
 
 import { WorkerMessageHandler } from "./core/worker.js";
 
-/* eslint-disable-next-line no-unused-vars */
-const pdfjsVersion = PDFJSDev.eval("BUNDLE_VERSION");
-/* eslint-disable-next-line no-unused-vars */
-const pdfjsBuild = PDFJSDev.eval("BUNDLE_BUILD");
+globalThis.pdfjsWorker = {
+  WorkerMessageHandler,
+};
 
 export { WorkerMessageHandler };

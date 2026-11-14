@@ -59,7 +59,7 @@ class FontInfo {
       fontFinder.find("Myriad Pro", false) ||
       fontFinder.find("Arial", false) ||
       fontFinder.getDefault();
-    if (font && font.regular) {
+    if (font?.regular) {
       const pdfFont = font.regular;
       const info = pdfFont.cssFontInfo;
       const xfaFont = {
@@ -102,7 +102,7 @@ class FontSelector {
   }
 
   pushData(xfaFont, margin, lineHeight) {
-    const lastFont = this.stack[this.stack.length - 1];
+    const lastFont = this.stack.at(-1);
     for (const name of [
       "typeface",
       "posture",
@@ -110,9 +110,7 @@ class FontSelector {
       "size",
       "letterSpacing",
     ]) {
-      if (!xfaFont[name]) {
-        xfaFont[name] = lastFont.xfaFont[name];
-      }
+      xfaFont[name] ||= lastFont.xfaFont[name];
     }
 
     for (const name of ["top", "bottom", "left", "right"]) {
@@ -127,9 +125,7 @@ class FontSelector {
       lineHeight || lastFont.lineHeight,
       this.fontFinder
     );
-    if (!fontInfo.pdfFont) {
-      fontInfo.pdfFont = lastFont.pdfFont;
-    }
+    fontInfo.pdfFont ||= lastFont.pdfFont;
 
     this.stack.push(fontInfo);
   }
@@ -139,7 +135,7 @@ class FontSelector {
   }
 
   topFont() {
-    return this.stack[this.stack.length - 1];
+    return this.stack.at(-1);
   }
 }
 

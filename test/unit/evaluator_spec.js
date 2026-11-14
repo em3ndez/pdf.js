@@ -14,9 +14,10 @@
  */
 
 import { createIdFactory, XRefMock } from "./test_utils.js";
-import { Dict, Name } from "../../src/core/primitives.js";
+import { Dict, Name, Ref, RefMap } from "../../src/core/primitives.js";
 import { FormatError, OPS } from "../../src/shared/util.js";
 import { Stream, StringStream } from "../../src/core/stream.js";
+import { GlobalColorSpaceCache } from "../../src/core/image_utils.js";
 import { OperatorList } from "../../src/core/operator_list.js";
 import { PartialEvaluator } from "../../src/core/evaluator.js";
 import { WorkerTask } from "../../src/core/worker.js";
@@ -49,6 +50,26 @@ describe("evaluator", function () {
     return operatorList;
   }
 
+  async function runTextContentCheck(evaluator, stream) {
+    const items = [];
+    const sink = {
+      desiredSize: 100,
+      ready: Promise.resolve(),
+      enqueue(chunk) {
+        items.push(...chunk.items);
+      },
+    };
+    const task = new WorkerTask("TextContentCheck");
+    await evaluator.getTextContent({
+      stream,
+      task,
+      resources: new ResourcesMock(),
+      includeMarkedContent: true,
+      sink,
+    });
+    return items;
+  }
+
   let partialEvaluator;
 
   beforeAll(function () {
@@ -57,6 +78,7 @@ describe("evaluator", function () {
       handler: new HandlerMock(),
       pageIndex: 0,
       idFactory: createIdFactory(/* pageIndex = */ 0),
+      globalColorSpaceCache: new GlobalColorSpaceCache(),
     });
   });
 
@@ -72,10 +94,10 @@ describe("evaluator", function () {
         stream,
         new ResourcesMock()
       );
-      expect(!!result.fnArray && !!result.argsArray).toEqual(true);
+      expect(!!result.fnArray && !!result.argsArray).toBeTrue();
       expect(result.fnArray.length).toEqual(1);
-      expect(result.fnArray[0]).toEqual(OPS.fill);
-      expect(result.argsArray[0]).toEqual(null);
+      expect(result.fnArray[0]).toEqual(OPS.constructPath);
+      expect(result.argsArray[0]).toEqual([OPS.fill, [null], null]);
     });
 
     it("should handle one operation", async function () {
@@ -85,7 +107,7 @@ describe("evaluator", function () {
         stream,
         new ResourcesMock()
       );
-      expect(!!result.fnArray && !!result.argsArray).toEqual(true);
+      expect(!!result.fnArray && !!result.argsArray).toBeTrue();
       expect(result.fnArray.length).toEqual(1);
       expect(result.fnArray[0]).toEqual(OPS.restore);
     });
@@ -118,7 +140,7 @@ describe("evaluator", function () {
       expect(result.argsArray.length).toEqual(3);
       expect(result.argsArray[0]).toEqual(["img_p0_1"]);
       expect(result.argsArray[1]).toEqual(["img_p0_1", 1, 1]);
-      expect(result.argsArray[2]).toEqual(null);
+      expect(result.argsArray[2]).toBeNull();
     });
 
     it("should handle three glued operations", async function () {
@@ -128,11 +150,16 @@ describe("evaluator", function () {
         stream,
         new ResourcesMock()
       );
-      expect(!!result.fnArray && !!result.argsArray).toEqual(true);
+      expect(!!result.fnArray && !!result.argsArray).toBeTrue();
       expect(result.fnArray.length).toEqual(3);
-      expect(result.fnArray[0]).toEqual(OPS.fill);
-      expect(result.fnArray[1]).toEqual(OPS.fill);
-      expect(result.fnArray[2]).toEqual(OPS.fill);
+      expect(result.fnArray).toEqual([
+        OPS.constructPath,
+        OPS.constructPath,
+        OPS.constructPath,
+      ]);
+      expect(result.argsArray[0][0]).toEqual(OPS.fill);
+      expect(result.argsArray[1][0]).toEqual(OPS.fill);
+      expect(result.argsArray[2][0]).toEqual(OPS.fill);
     });
 
     it("should handle three glued operations #2", async function () {
@@ -144,11 +171,15 @@ describe("evaluator", function () {
         stream,
         resources
       );
-      expect(!!result.fnArray && !!result.argsArray).toEqual(true);
-      expect(result.fnArray.length).toEqual(3);
-      expect(result.fnArray[0]).toEqual(OPS.eoFillStroke);
-      expect(result.fnArray[1]).toEqual(OPS.fillStroke);
-      expect(result.fnArray[2]).toEqual(OPS.eoFill);
+      expect(!!result.fnArray && !!result.argsArray).toBeTrue();
+      expect(result.fnArray).toEqual([
+        OPS.constructPath,
+        OPS.constructPath,
+        OPS.constructPath,
+      ]);
+      expect(result.argsArray[0][0]).toEqual(OPS.eoFillStroke);
+      expect(result.argsArray[1][0]).toEqual(OPS.fillStroke);
+      expect(result.argsArray[2][0]).toEqual(OPS.eoFill);
     });
 
     it("should handle glued operations and operands", async function () {
@@ -158,9 +189,9 @@ describe("evaluator", function () {
         stream,
         new ResourcesMock()
       );
-      expect(!!result.fnArray && !!result.argsArray).toEqual(true);
+      expect(!!result.fnArray && !!result.argsArray).toBeTrue();
       expect(result.fnArray.length).toEqual(2);
-      expect(result.fnArray[0]).toEqual(OPS.fill);
+      expect(result.fnArray[0]).toEqual(OPS.constructPath);
       expect(result.fnArray[1]).toEqual(OPS.setTextRise);
       expect(result.argsArray.length).toEqual(2);
       expect(result.argsArray[1].length).toEqual(1);
@@ -174,17 +205,17 @@ describe("evaluator", function () {
         stream,
         new ResourcesMock()
       );
-      expect(!!result.fnArray && !!result.argsArray).toEqual(true);
+      expect(!!result.fnArray && !!result.argsArray).toBeTrue();
       expect(result.fnArray.length).toEqual(3);
       expect(result.fnArray[0]).toEqual(OPS.setFlatness);
       expect(result.fnArray[1]).toEqual(OPS.setRenderingIntent);
-      expect(result.fnArray[2]).toEqual(OPS.endPath);
+      expect(result.fnArray[2]).toEqual(OPS.constructPath);
       expect(result.argsArray.length).toEqual(3);
       expect(result.argsArray[0].length).toEqual(1);
-      expect(result.argsArray[0][0]).toEqual(true);
+      expect(result.argsArray[0][0]).toBeTrue();
       expect(result.argsArray[1].length).toEqual(1);
-      expect(result.argsArray[1][0]).toEqual(false);
-      expect(result.argsArray[2]).toEqual(null);
+      expect(result.argsArray[1][0]).toBeFalse();
+      expect(result.argsArray[2]).toEqual([OPS.endPath, [null], null]);
     });
   });
 
@@ -261,10 +292,9 @@ describe("evaluator", function () {
         "(bug 1443140)",
       async function () {
         const NUM_INVALID_OPS = 25;
-        const tempArr = new Array(NUM_INVALID_OPS + 1);
 
         // Non-path operators, should be ignored.
-        const invalidMoveText = tempArr.join("10 Td\n");
+        const invalidMoveText = "10 Td\n".repeat(NUM_INVALID_OPS);
         const moveTextStream = new StringStream(invalidMoveText);
         const result = await runOperatorListCheck(
           partialEvaluator,
@@ -275,7 +305,7 @@ describe("evaluator", function () {
         expect(result.fnArray).toEqual([]);
 
         // Path operators, should throw error.
-        const invalidLineTo = tempArr.join("20 l\n");
+        const invalidLineTo = "20 l\n".repeat(NUM_INVALID_OPS);
         const lineToStream = new StringStream(invalidLineTo);
 
         try {
@@ -286,9 +316,9 @@ describe("evaluator", function () {
           );
 
           // Shouldn't get here.
-          expect(false).toEqual(true);
+          expect(false).toBeTrue();
         } catch (reason) {
-          expect(reason instanceof FormatError).toEqual(true);
+          expect(reason).toBeInstanceOf(FormatError);
           expect(reason.message).toEqual(
             "Invalid command l: expected 2 args, but received 1 args."
           );
@@ -303,7 +333,7 @@ describe("evaluator", function () {
         stream,
         new ResourcesMock()
       );
-      expect(!!result.fnArray && !!result.argsArray).toEqual(true);
+      expect(!!result.fnArray && !!result.argsArray).toBeTrue();
       expect(result.fnArray.length).toEqual(4);
       expect(result.fnArray[0]).toEqual(OPS.save);
       expect(result.fnArray[1]).toEqual(OPS.save);
@@ -322,9 +352,9 @@ describe("evaluator", function () {
         );
 
         // Shouldn't get here.
-        expect(false).toEqual(true);
+        expect(false).toBeTrue();
       } catch (reason) {
-        expect(reason instanceof FormatError).toEqual(true);
+        expect(reason).toBeInstanceOf(FormatError);
         expect(reason.message).toEqual("XObject should be a stream");
       }
     });
@@ -349,6 +379,44 @@ describe("evaluator", function () {
       expect(result.argsArray).toEqual([]);
       expect(result.fnArray).toEqual([]);
     });
+
+    it("should skip empty set fill/stroke color operators", async function () {
+      const colorOps = [
+        "SC",
+        "SCN",
+        "sc",
+        "scn",
+        "G",
+        "g",
+        "RG",
+        "rg",
+        "K",
+        "k",
+      ];
+
+      for (const op of colorOps) {
+        const stream = new StringStream(`/DeviceRGB CS /DeviceRGB cs ${op}`);
+        const result = await runOperatorListCheck(
+          partialEvaluator,
+          stream,
+          new ResourcesMock()
+        );
+        expect(result.argsArray).toEqual([]);
+        expect(result.fnArray).toEqual([]);
+      }
+    });
+
+    it("should handle invalid dash stuff", async function () {
+      const stream = new StringStream("[ none ] 0 d");
+      const result = await runOperatorListCheck(
+        partialEvaluator,
+        stream,
+        new ResourcesMock()
+      );
+      expect(result.argsArray[0][0]).toEqual([]);
+      expect(result.argsArray[0][1]).toEqual(0);
+      expect(result.fnArray[0]).toEqual(OPS.setDash);
+    });
   });
 
   describe("thread control", function () {
@@ -368,9 +436,9 @@ describe("evaluator", function () {
         });
 
         // Shouldn't get here.
-        expect(false).toEqual(true);
-      } catch (_) {
-        expect(!!result.fnArray && !!result.argsArray).toEqual(true);
+        expect(false).toBeTrue();
+      } catch {
+        expect(!!result.fnArray && !!result.argsArray).toBeTrue();
         expect(result.fnArray.length).toEqual(0);
       }
     });
@@ -389,10 +457,54 @@ describe("evaluator", function () {
         });
 
         // Shouldn't get here.
-        expect(false).toEqual(true);
-      } catch (_) {
-        expect(true).toEqual(true);
+        expect(false).toBeTrue();
+      } catch {
+        expect(true).toBeTrue();
       }
+    });
+  });
+
+  describe("text content", function () {
+    it("should close marked content opened in a text object", async function () {
+      const stream = new StringStream(
+        "/Outer BMC BT /Inner BMC ET /Sibling BMC EMC EMC"
+      );
+      const items = await runTextContentCheck(partialEvaluator, stream);
+
+      expect(items).toEqual([
+        { type: "beginMarkedContent", tag: "Outer" },
+        { type: "beginMarkedContent", tag: "Inner" },
+        { type: "endMarkedContent" },
+        { type: "beginMarkedContent", tag: "Sibling" },
+        { type: "endMarkedContent" },
+        { type: "endMarkedContent" },
+      ]);
+    });
+
+    it("should preserve marked content opened before a text object", async function () {
+      const stream = new StringStream(
+        "/Outer BMC BT ET BT ET /Inner BMC EMC EMC"
+      );
+      const items = await runTextContentCheck(partialEvaluator, stream);
+
+      expect(items).toEqual([
+        { type: "beginMarkedContent", tag: "Outer" },
+        { type: "beginMarkedContent", tag: "Inner" },
+        { type: "endMarkedContent" },
+        { type: "endMarkedContent" },
+      ]);
+    });
+
+    it("should not close marked content on an unmatched endText", async function () {
+      const stream = new StringStream("/Outer BMC ET /Inner BMC EMC EMC");
+      const items = await runTextContentCheck(partialEvaluator, stream);
+
+      expect(items).toEqual([
+        { type: "beginMarkedContent", tag: "Outer" },
+        { type: "beginMarkedContent", tag: "Inner" },
+        { type: "endMarkedContent" },
+        { type: "endMarkedContent" },
+      ]);
     });
   });
 
@@ -401,18 +513,63 @@ describe("evaluator", function () {
       enqueue() {}
     }
 
-    it("should get correct total length after flushing", function () {
+    it("should get correct length after flushing", function () {
       const operatorList = new OperatorList(null, new StreamSinkMock());
       operatorList.addOp(OPS.save, null);
       operatorList.addOp(OPS.restore, null);
 
-      expect(operatorList.totalLength).toEqual(2);
       expect(operatorList.length).toEqual(2);
 
       operatorList.flush();
 
-      expect(operatorList.totalLength).toEqual(2);
       expect(operatorList.length).toEqual(0);
+    });
+  });
+
+  describe("fonts", function () {
+    it("should use distinct names for concurrently loaded fallback fonts", async function () {
+      const evaluator = new PartialEvaluator({
+        xref: new XRefMock(),
+        idFactory: createIdFactory(/* pageIndex = */ 0),
+        fontCache: new RefMap(),
+        systemFontCache: new Map(),
+      }).clone({ ignoreErrors: true });
+
+      // Missing refs share the fallback dictionary.
+      const [font1, font2] = await Promise.all(
+        [10, 11].map(num =>
+          evaluator.loadFont(null, Ref.get(num, 0), Dict.empty)
+        )
+      );
+
+      expect(font1.dict).toBe(font2.dict);
+      expect(font1.loadedName).not.toEqual(font2.loadedName);
+    });
+  });
+
+  describe("graphics-state operators", function () {
+    it("should convert negative line width to absolute value in the graphic state", async function () {
+      const gState = new Dict();
+      gState.set("LW", -5);
+      const extGState = new Dict();
+      extGState.set("GSneg", gState);
+
+      const resources = new ResourcesMock();
+      resources.ExtGState = extGState;
+
+      const stream = new StringStream("/GSneg gs");
+      const result = await runOperatorListCheck(
+        partialEvaluator,
+        stream,
+        resources
+      );
+
+      expect(result.fnArray).toEqual([OPS.setGState]);
+
+      const stateEntries = result.argsArray[0][0];
+      const lwEntry = stateEntries.find(([key]) => key === "LW");
+      expect(lwEntry).toBeDefined();
+      expect(lwEntry[1]).toEqual(5);
     });
   });
 });

@@ -13,30 +13,49 @@
  * limitations under the License.
  */
 
-import { CSS_UNITS } from "./ui_utils.js";
-import { DefaultXfaLayerFactory } from "./xfa_layer_builder.js";
-import { getXfaPageViewport } from "pdfjs-lib";
+import { PixelsPerInch, XfaLayer } from "pdfjs-lib";
+import { SimpleLinkService } from "./pdf_link_service.js";
+import { XfaLayerBuilder } from "./xfa_layer_builder.js";
+
+class BasePrintServiceFactory {
+  constructor() {
+    if (typeof PDFJSDev === "undefined" || PDFJSDev.test("TESTING")) {
+      throw new Error("Cannot initialize BasePrintServiceFactory.");
+    }
+  }
+
+  static initGlobals(app) {}
+
+  static get supportsPrinting() {
+    throw new Error("Not implemented: supportsPrinting");
+  }
+
+  static createPrintService(params) {
+    throw new Error("Not implemented: createPrintService");
+  }
+}
 
 function getXfaHtmlForPrinting(printContainer, pdfDocument) {
   const xfaHtml = pdfDocument.allXfaHtml;
-  const factory = new DefaultXfaLayerFactory();
-  const scale = Math.round(CSS_UNITS * 100) / 100;
+  const linkService = new SimpleLinkService();
+  const scale = Math.round(PixelsPerInch.PDF_TO_CSS_UNITS * 100) / 100;
 
   for (const xfaPage of xfaHtml.children) {
     const page = document.createElement("div");
     page.className = "xfaPrintedPage";
-    printContainer.appendChild(page);
+    printContainer.append(page);
 
-    const builder = factory.createXfaLayerBuilder(
-      /* pageDiv = */ page,
-      /* pdfPage = */ null,
-      /* annotationStorage = */ pdfDocument.annotationStorage,
-      /* xfaHtml = */ xfaPage
-    );
-    const viewport = getXfaPageViewport(xfaPage, { scale });
+    const builder = new XfaLayerBuilder({
+      pdfPage: null,
+      annotationStorage: pdfDocument.annotationStorage,
+      linkService,
+      xfaHtml: xfaPage,
+    });
+    const viewport = XfaLayer.getPageViewport(xfaPage, { scale });
 
-    builder.render(viewport, "print");
+    builder.render({ viewport, intent: "print" });
+    page.append(builder.div);
   }
 }
 
-export { getXfaHtmlForPrinting };
+export { BasePrintServiceFactory, getXfaHtmlForPrinting };

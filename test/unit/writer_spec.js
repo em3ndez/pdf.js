@@ -13,19 +13,32 @@
  * limitations under the License.
  */
 
-import { Dict, Name, Ref } from "../../src/core/primitives.js";
-import { incrementalUpdate, writeDict } from "../../src/core/writer.js";
+import { Dict, Name, Ref, RefMap } from "../../src/core/primitives.js";
+import {
+  incrementalUpdate,
+  writeDict,
+  writeValue,
+} from "../../src/core/writer.js";
 import { bytesToString } from "../../src/shared/util.js";
 import { StringStream } from "../../src/core/stream.js";
+import { XRefMock } from "./test_utils.js";
 
 describe("Writer", function () {
+  beforeAll(function () {
+    jasmine.clock().install();
+    jasmine.clock().mockDate(new Date(0));
+  });
+
+  afterAll(function () {
+    jasmine.clock().uninstall();
+  });
+
   describe("Incremental update", function () {
-    it("should update a file with new objects", function () {
+    it("should update a file with new objects", async function () {
       const originalData = new Uint8Array();
-      const newRefs = [
-        { ref: Ref.get(123, 0x2d), data: "abc\n" },
-        { ref: Ref.get(456, 0x4e), data: "defg\n" },
-      ];
+      const changes = new RefMap();
+      changes.put(Ref.get(123, 0x2d), { data: "abc\n" });
+      changes.put(Ref.get(456, 0x4e), { data: "defg\n" });
       const xrefInfo = {
         newRef: Ref.get(789, 0),
         startXRef: 314,
@@ -34,35 +47,67 @@ describe("Writer", function () {
         infoRef: null,
         encryptRef: null,
         filename: "foo.pdf",
-        info: {},
+        infoMap: new Map(),
       };
 
-      let data = incrementalUpdate({ originalData, xrefInfo, newRefs });
+      let data = await incrementalUpdate({
+        originalData,
+        xrefInfo,
+        changes,
+        xref: {},
+        useXrefStream: true,
+      });
       data = bytesToString(data);
 
-      const expected =
+      let expected =
         "\nabc\n" +
         "defg\n" +
         "789 0 obj\n" +
-        "<< /Size 790 /Prev 314 /Type /XRef /Index [0 1 123 1 456 1 789 1] " +
-        "/ID [(id) (\x01#Eg\x89\xab\xcd\xef\xfe\xdc\xba\x98vT2\x10)] " +
-        "/W [1 1 2] /Length 16>> stream\n" +
-        "\x00\x01\xff\xff" +
-        "\x01\x01\x00\x2d" +
-        "\x01\x05\x00\x4e" +
-        "\x01\x0a\x00\x00\n" +
+        "<< /Prev 314 /Size 790 /Type /XRef /Index [123 1 456 1 789 1] " +
+        "/W [1 1 1] /ID [(id) (\xeb\x4b\x2a\xe7\x31\x36\xf0\xcd\x83\x35\x94\x2a\x36\xcf\xaa\xb0)] " +
+        "/Length 9>> stream\n" +
+        "\x01\x01\x2d" +
+        "\x01\x05\x4e" +
+        "\x01\x0a\x00\n" +
         "endstream\n" +
         "endobj\n" +
         "startxref\n" +
         "10\n" +
         "%%EOF\n";
+      expect(data).toEqual(expected);
 
+      data = await incrementalUpdate({
+        originalData,
+        xrefInfo,
+        changes,
+        xref: {},
+        useXrefStream: false,
+      });
+      data = bytesToString(data);
+
+      expected =
+        "\nabc\n" +
+        "defg\n" +
+        "xref\n" +
+        "123 1\n" +
+        "0000000001 00045 n\r\n" +
+        "456 1\n" +
+        "0000000005 00078 n\r\n" +
+        "789 1\n" +
+        "0000000010 00000 n\r\n" +
+        "trailer\n" +
+        "<< /Prev 314 /Size 789 " +
+        "/ID [(id) (\xeb\x4b\x2a\xe7\x31\x36\xf0\xcd\x83\x35\x94\x2a\x36\xcf\xaa\xb0)]>>\n" +
+        "startxref\n" +
+        "10\n" +
+        "%%EOF\n";
       expect(data).toEqual(expected);
     });
 
-    it("should update a file, missing the /ID-entry, with new objects", function () {
+    it("should update a file, missing the /ID-entry, with new objects", async function () {
       const originalData = new Uint8Array();
-      const newRefs = [{ ref: Ref.get(123, 0x2d), data: "abc\n" }];
+      const changes = new RefMap();
+      changes.put(Ref.get(123, 0x2d), { data: "abc\n" });
       const xrefInfo = {
         newRef: Ref.get(789, 0),
         startXRef: 314,
@@ -71,20 +116,25 @@ describe("Writer", function () {
         infoRef: null,
         encryptRef: null,
         filename: "foo.pdf",
-        info: {},
+        infoMap: new Map(),
       };
 
-      let data = incrementalUpdate({ originalData, xrefInfo, newRefs });
+      let data = await incrementalUpdate({
+        originalData,
+        xrefInfo,
+        changes,
+        xref: {},
+        useXrefStream: true,
+      });
       data = bytesToString(data);
 
       const expected =
         "\nabc\n" +
         "789 0 obj\n" +
-        "<< /Size 790 /Prev 314 /Type /XRef /Index [0 1 123 1 789 1] " +
-        "/W [1 1 2] /Length 12>> stream\n" +
-        "\x00\x01\xff\xff" +
-        "\x01\x01\x00\x2d" +
-        "\x01\x05\x00\x00\n" +
+        "<< /Prev 314 /Size 790 /Type /XRef /Index [123 1 789 1] " +
+        "/W [1 1 1] /Length 6>> stream\n" +
+        "\x01\x01\x2d" +
+        "\x01\x05\x00\n" +
         "endstream\n" +
         "endobj\n" +
         "startxref\n" +
@@ -96,7 +146,7 @@ describe("Writer", function () {
   });
 
   describe("writeDict", function () {
-    it("should write a Dict", function () {
+    it("should write a Dict", async function () {
       const dict = new Dict(null);
       dict.set("A", Name.get("B"));
       dict.set("B", Ref.get(123, 456));
@@ -108,38 +158,319 @@ describe("Writer", function () {
       const gdict = new Dict(null);
       gdict.set("H", 123.00001);
       const string = "a stream";
-      const stream = new StringStream(string);
-      stream.dict = new Dict(null);
+      const stream = new StringStream(string, new Dict());
       stream.dict.set("Length", string.length);
       gdict.set("I", stream);
 
       dict.set("G", gdict);
+      dict.set("J", true);
+      dict.set("K", false);
+
+      dict.set("NullArr", [null, 10]);
+      dict.set("NullVal", null);
 
       const buffer = [];
-      writeDict(dict, buffer, null);
+      await writeDict(dict, buffer, null);
 
       const expected =
         "<< /A /B /B 123 456 R /C 789 /D (hello world) " +
-        "/E (\\(hello\\\\world\\)) /F [1.23 4.5 6] " +
-        "/G << /H 123 /I << /Length 8>> stream\n" +
+        "/E (\\(hello\\\\world\\)) /F [1.23001 4.50001 6] " +
+        "/G << /H 123.00001 /I << /Length 8>> stream\n" +
         "a stream\n" +
-        "endstream\n>>>>";
+        "endstream>> /J true /K false " +
+        "/NullArr [null 10] /NullVal null>>";
 
       expect(buffer.join("")).toEqual(expected);
     });
 
-    it("should write a Dict in escaping PDF names", function () {
+    it("should write a Dict in escaping PDF names", async function () {
       const dict = new Dict(null);
       dict.set("\xfeA#", Name.get("hello"));
       dict.set("B", Name.get("#hello"));
       dict.set("C", Name.get("he\xfello\xff"));
 
       const buffer = [];
-      writeDict(dict, buffer, null);
+      await writeDict(dict, buffer, null);
 
       const expected = "<< /#feA#23 /hello /B /#23hello /C /he#fello#ff>>";
 
       expect(buffer.join("")).toEqual(expected);
     });
+
+    it("should encrypt a stream with its Crypt filter", async function () {
+      const string = "a".repeat(300);
+      const encryptStream = jasmine
+        .createSpy("encryptStream")
+        .and.callFake(s => s.toUpperCase());
+      const transform = { encryptString: s => s, encryptStream };
+
+      for (const cryptFilterName of [null, "StdCF"]) {
+        const context = cryptFilterName ?? "default";
+        const stream = new StringStream(string, new Dict());
+        stream.dict.set("Filter", Name.get("Crypt"));
+        let expectedParams = "";
+        if (cryptFilterName) {
+          const params = new Dict();
+          params.set("Name", Name.get(cryptFilterName));
+          stream.dict.set("DecodeParms", params);
+          expectedParams = ` /DecodeParms << /Name /${cryptFilterName}>>`;
+        }
+
+        const buffer = [];
+        await writeValue(stream, buffer, transform);
+
+        // /Crypt must stay first, even for long streams.
+        expect(buffer.join(""))
+          .withContext(context)
+          .toEqual(
+            `<< /Filter /Crypt${expectedParams} /Length 300>> stream\n` +
+              `${string.toUpperCase()}\nendstream`
+          );
+        // /Name defaults to /Identity (ISO 32000-1, Table 14).
+        expect(encryptStream.calls.mostRecent().args[2])
+          .withContext(context)
+          .toEqual(Name.get(cryptFilterName ?? "Identity"));
+      }
+    });
+
+    it("should remove a Crypt filter when the stream isn't encrypted", async function () {
+      const string = "616263>";
+      const cryptParams = new Dict();
+      cryptParams.set("Name", Name.get("Identity"));
+
+      for (const [context, filter, params, expectedFilter] of [
+        ["single filter", Name.get("Crypt"), cryptParams, ""],
+        [
+          "array of filters",
+          [Name.get("Crypt"), Name.get("ASCIIHexDecode")],
+          [cryptParams, null],
+          " /Filter [/ASCIIHexDecode] /DecodeParms [null]",
+        ],
+      ]) {
+        const stream = new StringStream(string, new Dict(new XRefMock()));
+        stream.dict.set("Filter", filter);
+        stream.dict.set("DecodeParms", params);
+
+        const buffer = [];
+        await writeValue(stream, buffer, null);
+
+        expect(buffer.join(""))
+          .withContext(context)
+          .toEqual(
+            `<<${expectedFilter} /Length 7>> stream\n${string}\nendstream`
+          );
+      }
+    });
+
+    it("should not compress a metadata stream", async function () {
+      // Above the compression threshold.
+      const string = "a".repeat(300);
+      const stream = new StringStream(string, new Dict());
+      stream.dict.setIfName("Type", "Metadata");
+      stream.dict.setIfName("Subtype", "XML");
+
+      const buffer = [];
+      await writeValue(stream, buffer, null);
+
+      expect(buffer.join("")).toEqual(
+        "<< /Type /Metadata /Subtype /XML /Length 300>> stream\n" +
+          `${string}\nendstream`
+      );
+    });
+  });
+
+  describe("XFA", function () {
+    it("should update AcroForm when no datasets in XFA array", async function () {
+      const originalData = new Uint8Array();
+      const changes = new RefMap();
+
+      const acroForm = new Dict(null);
+      acroForm.set("XFA", [
+        "preamble",
+        Ref.get(123, 0),
+        "postamble",
+        Ref.get(456, 0),
+      ]);
+      const acroFormRef = Ref.get(789, 0);
+      const xfaDatasetsRef = Ref.get(101112, 0);
+      const xfaData = "<hello>world</hello>";
+
+      const xrefInfo = {
+        newRef: Ref.get(131415, 0),
+        startXRef: 314,
+        fileIds: null,
+        rootRef: null,
+        infoRef: null,
+        encryptRef: null,
+        filename: "foo.pdf",
+        infoMap: new Map(),
+      };
+
+      let data = await incrementalUpdate({
+        originalData,
+        xrefInfo,
+        changes,
+        hasXfa: true,
+        xfaDatasetsRef,
+        hasXfaDatasetsEntry: false,
+        acroFormRef,
+        acroForm,
+        xfaData,
+        xref: {},
+        useXrefStream: true,
+      });
+      data = bytesToString(data);
+
+      const expected =
+        "\n" +
+        "789 0 obj\n" +
+        "<< /XFA [(preamble) 123 0 R (datasets) 101112 0 R (postamble) 456 0 R]>>\n" +
+        "endobj\n" +
+        "101112 0 obj\n" +
+        "<< /Type /EmbeddedFile /Length 20>> stream\n" +
+        "<hello>world</hello>\n" +
+        "endstream\n" +
+        "endobj\n" +
+        "131415 0 obj\n" +
+        "<< /Prev 314 /Size 131416 /Type /XRef /Index [789 1 101112 1 131415 1] /W [1 1 0] /Length 6>> stream\n" +
+        "\x01\x01\x01[\x01¹\n" +
+        "endstream\n" +
+        "endobj\n" +
+        "startxref\n" +
+        "185\n" +
+        "%%EOF\n";
+
+      expect(data).toEqual(expected);
+    });
+  });
+
+  describe("writeValue numbers", function () {
+    async function serialize(value) {
+      const buffer = [];
+      await writeValue(value, buffer, null);
+      return buffer.join("");
+    }
+
+    it("should write integers unchanged", async function () {
+      expect(await serialize(0)).toEqual("0");
+      expect(await serialize(1)).toEqual("1");
+      expect(await serialize(-42)).toEqual("-42");
+      expect(await serialize(123456789)).toEqual("123456789");
+    });
+
+    it("should write normal floats without trailing zeros", async function () {
+      expect(await serialize(1.5)).toEqual("1.5");
+      expect(await serialize(-3.14)).toEqual("-3.14");
+      expect(await serialize(1.23001)).toEqual("1.23001");
+      // Trailing zeros must be stripped.
+      expect(await serialize(1.1)).toEqual("1.1");
+      expect(await serialize(2.0)).toEqual("2");
+    });
+
+    it("should not use scientific notation for very small numbers", async function () {
+      // JavaScript's toString() would produce e.g. "8e-6", which is invalid
+      // PDF.
+      expect(await serialize(0.000008)).toEqual("0.000008");
+      expect(await serialize(0.000001)).toEqual("0.000001");
+      expect(await serialize(0.0000001)).toEqual("0.0000001");
+      expect(await serialize(-0.000008)).toEqual("-0.000008");
+    });
+
+    it("should not use scientific notation for very large numbers", async function () {
+      // JavaScript's toString() and toFixed() produce scientific notation from
+      // 1e21 on, which is invalid PDF: such a number must be written with all
+      // its digits, which are the exact ones of the underlying double.
+      expect(await serialize(1e10)).toEqual("10000000000");
+      expect(await serialize(1.5e6)).toEqual("1500000");
+      expect(await serialize(1e20)).toEqual("100000000000000000000");
+      expect(await serialize(1e21)).toEqual("1000000000000000000000");
+      // Removing the trailing zeros of the exponent used to change the value:
+      // "1e+30" was written "1e+3" and "1e+100" was written "1e+1".
+      expect(await serialize(1e30)).toEqual("1000000000000000019884624838656");
+      expect(await serialize(-1e30)).toEqual(
+        "-1000000000000000019884624838656"
+      );
+      expect((await serialize(1e100)).length).toEqual(101);
+    });
+
+    it("should round to at most 10 decimal places", async function () {
+      // 1/3 has infinite decimals; must be capped at 10 places.
+      const result = await serialize(1 / 3);
+      expect(result).toMatch(/^0\.\d{1,10}$/);
+      expect(result.replace("0.", "").length).toBeLessThanOrEqual(10);
+    });
+
+    it("should handle zero and negative zero", async function () {
+      expect(await serialize(0)).toEqual("0");
+      expect(await serialize(-0)).toEqual("0");
+    });
+  });
+
+  it("should update a file with a deleted object", async function () {
+    const originalData = new Uint8Array();
+    const changes = new RefMap();
+    changes.put(Ref.get(123, 0x2d), { data: null });
+    changes.put(Ref.get(456, 0x4e), { data: "abc\n" });
+    const xrefInfo = {
+      newRef: Ref.get(789, 0),
+      startXRef: 314,
+      fileIds: ["id", ""],
+      rootRef: null,
+      infoRef: null,
+      encryptRef: null,
+      filename: "foo.pdf",
+      infoMap: new Map(),
+    };
+
+    let data = await incrementalUpdate({
+      originalData,
+      xrefInfo,
+      changes,
+      xref: {},
+      useXrefStream: true,
+    });
+    data = bytesToString(data);
+
+    let expected =
+      "\nabc\n" +
+      "789 0 obj\n" +
+      "<< /Prev 314 /Size 790 /Type /XRef /Index [123 1 456 1 789 1] " +
+      "/W [1 1 1] /ID [(id) (\x5f\xd1\x43\x8e\xf8\x62\x79\x80\xbb\xd6\xf7\xb6\xd2\xb5\x6f\xd8)] " +
+      "/Length 9>> stream\n" +
+      "\x00\x00\x2e" +
+      "\x01\x01\x4e" +
+      "\x01\x05\x00\n" +
+      "endstream\n" +
+      "endobj\n" +
+      "startxref\n" +
+      "5\n" +
+      "%%EOF\n";
+    expect(data).toEqual(expected);
+
+    data = await incrementalUpdate({
+      originalData,
+      xrefInfo,
+      changes,
+      xref: {},
+      useXrefStream: false,
+    });
+    data = bytesToString(data);
+
+    expected =
+      "\nabc\n" +
+      "xref\n" +
+      "123 1\n" +
+      "0000000000 00046 f\r\n" +
+      "456 1\n" +
+      "0000000001 00078 n\r\n" +
+      "789 1\n" +
+      "0000000005 00000 n\r\n" +
+      "trailer\n" +
+      "<< /Prev 314 /Size 789 " +
+      "/ID [(id) (\x5f\xd1\x43\x8e\xf8\x62\x79\x80\xbb\xd6\xf7\xb6\xd2\xb5\x6f\xd8)]>>\n" +
+      "startxref\n" +
+      "5\n" +
+      "%%EOF\n";
+    expect(data).toEqual(expected);
   });
 });

@@ -13,9 +13,10 @@
  * limitations under the License.
  */
 
-import { isDict, isStream } from "./primitives.js";
+import { BaseStream } from "./base_stream.js";
 import { DecodeStream } from "./decode_stream.js";
-import { Jbig2Image } from "./jbig2.js";
+import { Dict } from "./primitives.js";
+import { JBig2CCITTFaxImage } from "./jbig2_ccittFax.js";
 import { shadow } from "../shared/util.js";
 
 /**
@@ -42,31 +43,61 @@ class Jbig2Stream extends DecodeStream {
     // directly insert all of its data into `this.buffer`.
   }
 
-  readBlock() {
-    if (this.eof) {
-      return;
-    }
-    const jbig2Image = new Jbig2Image();
+  get isAsyncDecoder() {
+    return true;
+  }
 
-    const chunks = [];
-    if (isDict(this.params)) {
+  get isImageStream() {
+    return true;
+  }
+
+  // The JBIG2 file header is defined in ITU-T T.88, Annex D.4:
+  // https://www.itu.int/rec/T-REC-T.88
+  static stripFileHeader(bytes) {
+    if (
+      bytes.length >= 9 &&
+      bytes[0] === 0x97 &&
+      bytes[1] === 0x4a &&
+      bytes[2] === 0x42 &&
+      bytes[3] === 0x32 &&
+      bytes[4] === 0x0d &&
+      bytes[5] === 0x0a &&
+      bytes[6] === 0x1a &&
+      bytes[7] === 0x0a
+    ) {
+      const headerLength = (bytes[8] & 2) === 0 ? 13 : 9;
+      return bytes.subarray(headerLength);
+    }
+    return bytes;
+  }
+
+  async decodeImage(bytes, length, _decoderOptions) {
+    if (this.eof) {
+      return this.buffer;
+    }
+    bytes = Jbig2Stream.stripFileHeader(bytes || this.bytes);
+
+    let globals = null;
+    if (this.params instanceof Dict) {
       const globalsStream = this.params.get("JBIG2Globals");
-      if (isStream(globalsStream)) {
-        const globals = globalsStream.getBytes();
-        chunks.push({ data: globals, start: 0, end: globals.length });
+      if (globalsStream instanceof BaseStream) {
+        globals = Jbig2Stream.stripFileHeader(globalsStream.getBytes());
       }
     }
-    chunks.push({ data: this.bytes, start: 0, end: this.bytes.length });
-    const data = jbig2Image.parseChunks(chunks);
-    const dataLength = data.length;
-
-    // JBIG2 had black as 1 and white as 0, inverting the colors
-    for (let i = 0; i < dataLength; i++) {
-      data[i] ^= 0xff;
-    }
-    this.buffer = data;
-    this.bufferLength = dataLength;
+    this.buffer = await JBig2CCITTFaxImage.instance.decode(
+      bytes,
+      this.dict.get("Width"),
+      this.dict.get("Height"),
+      globals
+    );
+    this.bufferLength = this.buffer.length;
     this.eof = true;
+
+    return this.buffer;
+  }
+
+  get canAsyncDecodeImageFromBuffer() {
+    return this.stream.isAsync;
   }
 }
 

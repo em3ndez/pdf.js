@@ -13,24 +13,18 @@
  * limitations under the License.
  */
 
-import { getPdfFilenameFromUrl, loadScript } from "pdfjs-lib";
+import { getPdfFilenameFromUrl } from "pdfjs-lib";
 
-async function docPropertiesLookup(pdfDocument) {
+async function docProperties(pdfDocument) {
   const url = "",
-    baseUrl = url.split("#")[0];
-  // eslint-disable-next-line prefer-const
-  let { info, metadata, contentDispositionFilename, contentLength } =
+    baseUrl = "";
+  const { info, metadata, contentDispositionFilename, contentLength } =
     await pdfDocument.getMetadata();
-
-  if (!contentLength) {
-    const { length } = await pdfDocument.getDownloadInfo();
-    contentLength = length;
-  }
 
   return {
     ...info,
     baseURL: baseUrl,
-    filesize: contentLength,
+    filesize: contentLength || (await pdfDocument.getDownloadInfo()).length,
     filename: contentDispositionFilename || getPdfFilenameFromUrl(url),
     metadata: metadata?.getRaw(),
     authors: metadata?.get("dc:creator"),
@@ -40,12 +34,19 @@ async function docPropertiesLookup(pdfDocument) {
 }
 
 class GenericScripting {
-  constructor(sandboxBundleSrc) {
-    this._ready = loadScript(
-      sandboxBundleSrc,
-      /* removeScriptElement = */ true
-    ).then(() => {
-      return window.pdfjsSandbox.QuickJSSandbox();
+  constructor(sandboxBundleSrc, wasmUrl) {
+    this._ready = new Promise((resolve, reject) => {
+      const sandbox =
+        typeof PDFJSDev === "undefined"
+          ? import(sandboxBundleSrc) // eslint-disable-line no-unsanitized/method
+          : __raw_import__(sandboxBundleSrc);
+      sandbox
+        .then(pdfjsSandbox => {
+          resolve(
+            pdfjsSandbox.QuickJSSandbox(new URL(wasmUrl, location.href).href)
+          );
+        })
+        .catch(reject);
     });
   }
 
@@ -56,7 +57,7 @@ class GenericScripting {
 
   async dispatchEventInSandbox(event) {
     const sandbox = await this._ready;
-    sandbox.dispatchEvent(event);
+    setTimeout(() => sandbox.dispatchEvent(event), 0);
   }
 
   async destroySandbox() {
@@ -65,4 +66,4 @@ class GenericScripting {
   }
 }
 
-export { docPropertiesLookup, GenericScripting };
+export { docProperties, GenericScripting };

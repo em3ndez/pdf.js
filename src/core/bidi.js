@@ -15,6 +15,9 @@
 
 import { warn } from "../shared/util.js";
 
+// Implements a subset of the Unicode Bidirectional Algorithm (UBA).
+// Specification: https://www.unicode.org/reports/tr9/tr9-48.html
+
 // Character types for symbols from 0000 to 00FF.
 // Source: ftp://ftp.unicode.org/Public/UNIDATA/UnicodeData.txt
 // prettier-ignore
@@ -73,6 +76,8 @@ const arabicTypes = [
   "EN", "EN", "EN", "EN", "EN", "EN", "AL", "AL", "AL", "AL", "AL", "AL"
 ];
 
+const NonSpacingMarkRegExp = /[\p{Mn}\p{Me}]/u;
+
 function isOdd(i) {
   return (i & 1) !== 0;
 }
@@ -81,20 +86,13 @@ function isEven(i) {
   return (i & 1) === 0;
 }
 
-function findUnequal(arr, start, value) {
-  let j, jj;
-  for (j = start, jj = arr.length; j < jj; ++j) {
+function findUnequal(arr, start, value, end = arr.length) {
+  for (let j = start; j < end; ++j) {
     if (arr[j] !== value) {
       return j;
     }
   }
-  return j;
-}
-
-function setValues(arr, start, end, value) {
-  for (let j = start; j < end; ++j) {
-    arr[j] = value;
-  }
+  return end;
 }
 
 function reverseValues(arr, start, end) {
@@ -120,8 +118,15 @@ function createBidiText(str, isLTR, vertical = false) {
 const chars = [];
 const types = [];
 
-function bidi(str, startLevel, vertical) {
+/**
+ * @param {string|Array<string>} text - Text to reorder, or glyph texts in
+ *   visual order. Each glyph's text is expected to be in logical order and is
+ *   kept intact if all its characters resolve to the same bidi level.
+ */
+function bidi(text, startLevel = -1, vertical = false) {
   let isLTR = true;
+  const glyphs = Array.isArray(text) ? text : null;
+  const str = glyphs ? glyphs.join("") : text;
   const strLength = str.length;
   if (strLength === 0 || vertical) {
     return createBidiText(str, isLTR, vertical);
@@ -147,7 +152,11 @@ function bidi(str, startLevel, vertical) {
       if (!charType) {
         warn("Bidi: invalid Unicode character " + charCode.toString(16));
       }
-    } else if (0x0700 <= charCode && charCode <= 0x08ac) {
+    } else if (
+      (0x0700 <= charCode && charCode <= 0x08ac) ||
+      (0xfb50 <= charCode && charCode <= 0xfdff) ||
+      (0xfe70 <= charCode && charCode <= 0xfeff)
+    ) {
       charType = "AL";
     }
     if (charType === "R" || charType === "AL" || charType === "AN") {
@@ -158,7 +167,8 @@ function bidi(str, startLevel, vertical) {
 
   // Detect the bidi method
   // - If there are no rtl characters then no bidi needed
-  // - If less than 30% chars are rtl then string is primarily ltr
+  // - If less than 30% chars are rtl then string is primarily ltr,
+  //   unless the string is very short.
   // - If more than 30% chars are rtl then string is primarily rtl
   if (numBidi === 0) {
     isLTR = true;
@@ -166,7 +176,7 @@ function bidi(str, startLevel, vertical) {
   }
 
   if (startLevel === -1) {
-    if (numBidi / strLength < 0.3) {
+    if (numBidi / strLength < 0.3 && strLength > 4) {
       isLTR = true;
       startLevel = 0;
     } else {
@@ -174,11 +184,7 @@ function bidi(str, startLevel, vertical) {
       startLevel = 1;
     }
   }
-
-  const levels = [];
-  for (i = 0; i < strLength; ++i) {
-    levels[i] = startLevel;
-  }
+  const levels = new Array(strLength).fill(startLevel);
 
   /*
    X1-X10: skip most of this, since we are NOT doing the embeddings.
@@ -194,7 +200,12 @@ function bidi(str, startLevel, vertical) {
    */
   let lastType = sor;
   for (i = 0; i < strLength; ++i) {
-    if (types[i] === "NSM") {
+    if (
+      types[i] === "NSM" ||
+      (types[i] === "L" &&
+        str.charCodeAt(i) >= 0x0300 &&
+        NonSpacingMarkRegExp.test(chars[i]))
+    ) {
       types[i] = lastType;
     } else {
       lastType = types[i];
@@ -298,27 +309,44 @@ function bidi(str, startLevel, vertical) {
    text if the text on both sides has the same direction. European and Arabic
    numbers are treated as though they were R. Start-of-level-run (sor) and
    end-of-level-run (eor) are used at level run boundaries.
+   See https://www.unicode.org/reports/tr9/tr9-48.html#N1
    */
   for (i = 0; i < strLength; ++i) {
     if (types[i] === "ON") {
       const end = findUnequal(types, i + 1, "ON");
+
+      // Scan left past non-strong types to find the nearest strong context
+      // (L, R, EN, or AN), falling back to sor at the level-run boundary.
       let before = sor;
-      if (i > 0) {
-        before = types[i - 1];
+      for (let j = i - 1; j >= 0; j--) {
+        const tt = types[j];
+        if (tt === "L") {
+          before = "L";
+          break;
+        }
+        if (tt === "R" || tt === "EN" || tt === "AN") {
+          before = "R";
+          break;
+        }
       }
 
+      // Scan right past non-strong types to find the nearest strong context,
+      // falling back to eor at the level-run boundary.
       let after = eor;
-      if (end + 1 < strLength) {
-        after = types[end + 1];
+      for (let j = end; j < strLength; j++) {
+        const tt = types[j];
+        if (tt === "L") {
+          after = "L";
+          break;
+        }
+        if (tt === "R" || tt === "EN" || tt === "AN") {
+          after = "R";
+          break;
+        }
       }
-      if (before !== "L") {
-        before = "R";
-      }
-      if (after !== "L") {
-        after = "R";
-      }
+
       if (before === after) {
-        setValues(types, i, end, before);
+        types.fill(before, i, end);
       }
       i = end - 1; // reset to end (-1 so next iteration is ok)
     }
@@ -348,11 +376,8 @@ function bidi(str, startLevel, vertical) {
       } else if (t === "AN" || t === "EN") {
         levels[i] += 2;
       }
-    } else {
-      // isOdd
-      if (t === "L" || t === "AN" || t === "EN") {
-        levels[i] += 1;
-      }
+    } else if (/* isOdd && */ t === "L" || t === "AN" || t === "EN") {
+      levels[i] += 1;
     }
   }
 
@@ -386,6 +411,23 @@ function bidi(str, startLevel, vertical) {
     }
     if (lowestOddLevel > level && isOdd(level)) {
       lowestOddLevel = level;
+    }
+  }
+
+  if (glyphs) {
+    let pos = 0;
+    for (const glyph of glyphs) {
+      const end = pos + glyph.length;
+      if (
+        glyph.length > 1 &&
+        findUnequal(levels, pos + 1, levels[pos], end) === end
+      ) {
+        // Store the whole glyph in one slot. Empty strings in the remaining
+        // slots preserve the indices used by the character levels.
+        chars[pos] = glyph;
+        chars.fill("", pos + 1, end);
+      }
+      pos = end;
     }
   }
 
@@ -426,13 +468,7 @@ function bidi(str, startLevel, vertical) {
   // don't mirror as characters are already mirrored in the pdf
 
   // Finally, return string
-  for (i = 0, ii = chars.length; i < ii; ++i) {
-    const ch = chars[i];
-    if (ch === "<" || ch === ">") {
-      chars[i] = "";
-    }
-  }
-  return createBidiText(chars.join(""), isLTR);
+  return createBidiText(chars.join("").replaceAll(/[<>]/g, ""), isLTR);
 }
 
 export { bidi };

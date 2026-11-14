@@ -14,9 +14,8 @@
  */
 
 import { $buildXFAObject, NamespaceIds } from "./namespaces.js";
+import { $content, $finalize } from "./symbol_utils.js";
 import {
-  $content,
-  $finalize,
   ContentObject,
   IntegerObject,
   Option01,
@@ -427,13 +426,10 @@ class EquateRange extends XFAObject {
     for (let range of unicodeRange
       .split(",")
       .map(x => x.trim())
-      .filter(x => !!x)) {
+      .filter(Boolean)) {
       range = range.split("-", 2).map(x => {
         const found = x.match(unicodeRegex);
-        if (!found) {
-          return 0;
-        }
-        return parseInt(found[1], 16);
+        return !found ? 0 : parseInt(found[1], 16);
       });
       if (range.length === 1) {
         range.push(range[0]);
@@ -957,8 +953,7 @@ class Range extends ContentObject {
 
   [$finalize]() {
     this[$content] = this[$content]
-      .trim()
-      .split(/\s*,\s*/, 2)
+      .split(",", 2)
       .map(range => range.split("-").map(x => parseInt(x.trim(), 10)))
       .filter(range => range.every(x => !isNaN(x)))
       .map(range => {
@@ -1005,7 +1000,7 @@ class Rename extends ContentObject {
     // is no colon.
     if (
       this[$content].toLowerCase().startsWith("xml") ||
-      this[$content].match(new RegExp("[\\p{L}_][\\p{L}\\d._\\p{M}-]*", "u"))
+      /[\p{L}_][\p{L}\d._\p{M}-]*/u.test(this[$content])
     ) {
       warn("XFA - Rename: invalid XFA name");
     }
@@ -1309,10 +1304,7 @@ class Window extends ContentObject {
   }
 
   [$finalize]() {
-    const pair = this[$content]
-      .trim()
-      .split(/\s*,\s*/, 2)
-      .map(x => parseInt(x, 10));
+    const pair = this[$content].split(",", 2).map(x => parseInt(x.trim(), 10));
     if (pair.some(x => isNaN(x))) {
       this[$content] = [0, 0];
       return;
@@ -1360,10 +1352,9 @@ class Zpl extends XFAObject {
 
 class ConfigNamespace {
   static [$buildXFAObject](name, attributes) {
-    if (ConfigNamespace.hasOwnProperty(name)) {
-      return ConfigNamespace[name](attributes);
-    }
-    return undefined;
+    return Object.hasOwn(ConfigNamespace, name)
+      ? ConfigNamespace[name](attributes)
+      : undefined;
   }
 
   static acrobat(attrs) {

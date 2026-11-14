@@ -18,41 +18,37 @@ import { DecodeStream } from "./decode_stream.js";
 const chunkSize = 512;
 
 class DecryptStream extends DecodeStream {
+  #nextChunk = null;
+
   constructor(str, maybeLength, decrypt) {
     super(maybeLength);
 
-    this.str = str;
+    this.stream = str;
     this.dict = str.dict;
     this.decrypt = decrypt;
-    this.nextChunk = null;
-    this.initialized = false;
   }
 
   readBlock() {
-    let chunk;
-    if (this.initialized) {
-      chunk = this.nextChunk;
-    } else {
-      chunk = this.str.getBytes(chunkSize);
-      this.initialized = true;
-    }
-    if (!chunk || chunk.length === 0) {
+    let chunk = this.#nextChunk ?? this.stream.getBytes(chunkSize);
+    if (!chunk.length) {
       this.eof = true;
       return;
     }
-    this.nextChunk = this.str.getBytes(chunkSize);
-    const hasMoreData = this.nextChunk && this.nextChunk.length > 0;
+    this.#nextChunk = this.stream.getBytes(chunkSize);
+    const hasMoreData = this.#nextChunk.length > 0;
 
     const decrypt = this.decrypt;
     chunk = decrypt(chunk, !hasMoreData);
 
-    let bufferLength = this.bufferLength;
-    const n = chunk.length,
-      buffer = this.ensureBuffer(bufferLength + n);
-    for (let i = 0; i < n; i++) {
-      buffer[bufferLength++] = chunk[i];
-    }
-    this.bufferLength = bufferLength;
+    const bufferLength = this.bufferLength,
+      newLength = bufferLength + chunk.length,
+      buffer = this.ensureBuffer(newLength);
+    buffer.set(chunk, bufferLength);
+    this.bufferLength = newLength;
+  }
+
+  getOriginalStream() {
+    return this;
   }
 }
 

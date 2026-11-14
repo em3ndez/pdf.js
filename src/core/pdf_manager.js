@@ -13,11 +13,26 @@
  * limitations under the License.
  */
 
-import { createValidAbsoluteUrl, unreachable, warn } from "../shared/util.js";
+import { CmykICCBasedCS, IccColorSpace } from "./icc_colorspace.js";
+import {
+  createValidAbsoluteUrl,
+  FeatureTest,
+  unreachable,
+  warn,
+} from "../shared/util.js";
 import { ChunkedStreamManager } from "./chunked_stream.js";
+import { ImageResizer } from "./image_resizer.js";
+import { JpegStream } from "./jpeg_stream.js";
 import { MissingDataException } from "./core_utils.js";
+import { OperatorList } from "./operator_list.js";
 import { PDFDocument } from "./document.js";
+import { PDFFunctionFactory } from "./function.js";
 import { Stream } from "./stream.js";
+import { WasmImage } from "./wasm_image.js";
+
+/**
+ * @typedef { LocalPdfManager | NetworkPdfManager } PdfManager
+ */
 
 function parseDocBaseUrl(url) {
   if (url) {
@@ -31,10 +46,59 @@ function parseDocBaseUrl(url) {
 }
 
 class BasePdfManager {
-  constructor() {
-    if (this.constructor === BasePdfManager) {
+  static #handlers = new Map();
+
+  constructor({
+    // source,
+    // disableAutoFetch,
+    docBaseUrl,
+    docId,
+    enableXfa,
+    evaluatorOptions,
+    handler,
+    // length,
+    password,
+    // rangeChunkSize,
+  }) {
+    if (
+      (typeof PDFJSDev === "undefined" || PDFJSDev.test("TESTING")) &&
+      this.constructor === BasePdfManager
+    ) {
       unreachable("Cannot initialize BasePdfManager.");
     }
+    this._docBaseUrl = parseDocBaseUrl(docBaseUrl);
+    this._docId = docId;
+    this._password = password;
+    this.enableXfa = enableXfa;
+
+    // Keep track of all active `MessageHandler`s to prevent issues with
+    // Wasm-decoding of images if multiple PDFs are parsed in parallel in one
+    // worker-thread and `useWorkerFetch = false` is set (fixes issue 22131).
+    BasePdfManager.#handlers.set(this, handler);
+
+    // Check `OffscreenCanvas` and `ImageDecoder` support once,
+    // rather than repeatedly throughout the worker-thread code.
+    evaluatorOptions.isOffscreenCanvasSupported &&=
+      FeatureTest.isOffscreenCanvasSupported;
+    evaluatorOptions.isImageDecoderSupported &&=
+      FeatureTest.isImageDecoderSupported;
+
+    this.evaluatorOptions = Object.freeze(evaluatorOptions);
+
+    // Initialize image-options once per document.
+    ImageResizer.setOptions(evaluatorOptions);
+    JpegStream.setOptions(evaluatorOptions);
+    OperatorList.setOptions(evaluatorOptions);
+
+    const options = {
+      ...evaluatorOptions,
+      getHandler: () =>
+        BasePdfManager.#handlers.values().find(h => !h.destroyed),
+    };
+    IccColorSpace.setOptions(options);
+    CmykICCBasedCS.setOptions(options);
+    PDFFunctionFactory.setOptions(options);
+    WasmImage.setOptions(options);
   }
 
   get docId() {
@@ -49,20 +113,25 @@ class BasePdfManager {
     return this._docBaseUrl;
   }
 
-  onLoadedStream() {
-    unreachable("Abstract method `onLoadedStream` called");
-  }
-
   ensureDoc(prop, args) {
     return this.ensure(this.pdfDocument, prop, args);
   }
 
-  ensureXRef(prop, args) {
-    return this.ensure(this.pdfDocument.xref, prop, args);
-  }
-
   ensureCatalog(prop, args) {
     return this.ensure(this.pdfDocument.catalog, prop, args);
+  }
+
+  async initDocument(recoveryMode) {
+    await this.ensureDoc("checkHeader");
+    await this.ensureDoc("parseStartXRef");
+    await this.ensureDoc("parse", [recoveryMode]);
+
+    // Check that at least the first page can be successfully loaded,
+    // since otherwise the XRef table is definitely not valid.
+    await this.ensureDoc("checkFirstPage", [recoveryMode]);
+    // Check that the last page can be successfully loaded, to ensure that
+    // `numPages` is correct, and fallback to walking the entire /Pages-tree.
+    await this.ensureDoc("checkLastPage", [recoveryMode]);
   }
 
   getPage(pageIndex) {
@@ -71,18 +140,6 @@ class BasePdfManager {
 
   fontFallback(id, handler) {
     return this.pdfDocument.fontFallback(id, handler);
-  }
-
-  loadXfaFonts(handler, task) {
-    return this.pdfDocument.loadXfaFonts(handler, task);
-  }
-
-  loadXfaImages() {
-    return this.pdfDocument.loadXfaImages();
-  }
-
-  serializeXfaData(annotationStorage) {
-    return this.pdfDocument.serializeXfaData(annotationStorage);
   }
 
   cleanup(manuallyTriggered = false) {
@@ -97,7 +154,7 @@ class BasePdfManager {
     unreachable("Abstract method `requestRange` called");
   }
 
-  requestLoadedStream() {
+  requestLoadedStream(noFetch = false) {
     unreachable("Abstract method `requestLoadedStream` called");
   }
 
@@ -105,71 +162,48 @@ class BasePdfManager {
     unreachable("Abstract method `sendProgressiveData` called");
   }
 
+  /**
+   * Set password.
+   * @param {string} password
+   *   New password.
+   * @returns {undefined}
+   *   Nothing.
+   */
   updatePassword(password) {
     this._password = password;
+    this.pdfDocument.xref.encrypt?.setPassword(password);
   }
 
   terminate(reason) {
-    unreachable("Abstract method `terminate` called");
+    BasePdfManager.#handlers.delete(this);
   }
 }
 
 class LocalPdfManager extends BasePdfManager {
-  constructor(docId, data, password, evaluatorOptions, enableXfa, docBaseUrl) {
-    super();
+  constructor(args) {
+    super(args);
 
-    this._docId = docId;
-    this._password = password;
-    this._docBaseUrl = parseDocBaseUrl(docBaseUrl);
-    this.evaluatorOptions = evaluatorOptions;
-    this.enableXfa = enableXfa;
-
-    const stream = new Stream(data);
+    const stream = new Stream(args.source);
     this.pdfDocument = new PDFDocument(this, stream);
     this._loadedStreamPromise = Promise.resolve(stream);
   }
 
   async ensure(obj, prop, args) {
     const value = obj[prop];
-    if (typeof value === "function") {
-      return value.apply(obj, args);
-    }
-    return value;
+    return typeof value === "function" ? value.apply(obj, args) : value;
   }
 
-  requestRange(begin, end) {
-    return Promise.resolve();
-  }
-
-  requestLoadedStream() {}
-
-  onLoadedStream() {
+  requestLoadedStream(noFetch = false) {
     return this._loadedStreamPromise;
   }
-
-  terminate(reason) {}
 }
 
 class NetworkPdfManager extends BasePdfManager {
-  constructor(
-    docId,
-    pdfNetworkStream,
-    args,
-    evaluatorOptions,
-    enableXfa,
-    docBaseUrl
-  ) {
-    super();
+  constructor(args) {
+    super(args);
 
-    this._docId = docId;
-    this._password = args.password;
-    this._docBaseUrl = parseDocBaseUrl(docBaseUrl);
-    this.msgHandler = args.msgHandler;
-    this.evaluatorOptions = evaluatorOptions;
-    this.enableXfa = enableXfa;
-
-    this.streamManager = new ChunkedStreamManager(pdfNetworkStream, {
-      msgHandler: args.msgHandler,
+    this.streamManager = new ChunkedStreamManager(args.source, {
+      msgHandler: args.handler,
       length: args.length,
       disableAutoFetch: args.disableAutoFetch,
       rangeChunkSize: args.rangeChunkSize,
@@ -180,10 +214,7 @@ class NetworkPdfManager extends BasePdfManager {
   async ensure(obj, prop, args) {
     try {
       const value = obj[prop];
-      if (typeof value === "function") {
-        return value.apply(obj, args);
-      }
-      return value;
+      return typeof value === "function" ? await value.apply(obj, args) : value;
     } catch (ex) {
       if (!(ex instanceof MissingDataException)) {
         throw ex;
@@ -197,19 +228,16 @@ class NetworkPdfManager extends BasePdfManager {
     return this.streamManager.requestRange(begin, end);
   }
 
-  requestLoadedStream() {
-    this.streamManager.requestAllChunks();
+  requestLoadedStream(noFetch = false) {
+    return this.streamManager.requestAllChunks(noFetch);
   }
 
   sendProgressiveData(chunk) {
     this.streamManager.onReceiveData({ chunk });
   }
 
-  onLoadedStream() {
-    return this.streamManager.onLoadedStream();
-  }
-
   terminate(reason) {
+    super.terminate(reason);
     this.streamManager.abort(reason);
   }
 }

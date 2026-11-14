@@ -13,52 +13,53 @@
  * limitations under the License.
  */
 
-import { isRef, Ref } from "../../src/core/primitives.js";
+import { assert, isNodeJS, stringToBytes } from "../../src/shared/util.js";
+import { Dict, Name, Ref } from "../../src/core/primitives.js";
+import {
+  fetchData as fetchDataNode,
+  NodeBinaryDataFactory,
+} from "../../src/display/node_utils.js";
+import { NullStream, StringStream } from "../../src/core/stream.js";
 import { Page, PDFDocument } from "../../src/core/document.js";
-import { assert } from "../../src/shared/util.js";
-import { isNodeJS } from "../../src/shared/is_node.js";
-import { StringStream } from "../../src/core/stream.js";
+import { decodeBrotli } from "../../src/core/wasm_loader.js";
+import { DOMBinaryDataFactory } from "../../src/display/binary_data_factory.js";
+import { fetchData as fetchDataDOM } from "../../src/display/dom_utils.js";
 
 const TEST_PDFS_PATH = isNodeJS ? "./test/pdfs/" : "../pdfs/";
 
-const CMAP_PARAMS = {
-  cMapUrl: isNodeJS ? "./external/bcmaps/" : "../../external/bcmaps/",
-  cMapPacked: true,
-};
+const CMAP_URL = isNodeJS ? "./external/bcmaps/" : "../../external/bcmaps/";
 
 const STANDARD_FONT_DATA_URL = isNodeJS
-  ? "./external/standard_fonts/"
-  : "../../external/standard_fonts/";
+  ? "./external/hellbox/"
+  : "../../external/hellbox/";
 
-class DOMFileReaderFactory {
+const WASM_URL = isNodeJS
+  ? "./build/generic-legacy/web/wasm/"
+  : "../../build/generic/web/wasm/";
+
+class DefaultFileReaderFactory {
   static async fetch(params) {
-    const response = await fetch(params.path);
-    if (!response.ok) {
-      throw new Error(response.statusText);
-    }
-    return new Uint8Array(await response.arrayBuffer());
+    return isNodeJS
+      ? fetchDataNode(params.path)
+      : fetchDataDOM(params.path, /* type = */ "bytes");
   }
 }
 
-class NodeFileReaderFactory {
-  static async fetch(params) {
-    const fs = require("fs");
+const DefaultBinaryDataFactory =
+  typeof PDFJSDev !== "undefined" && PDFJSDev.test("GENERIC") && isNodeJS
+    ? NodeBinaryDataFactory
+    : DOMBinaryDataFactory;
 
-    return new Promise((resolve, reject) => {
-      fs.readFile(params.path, (error, data) => {
-        if (error || !data) {
-          reject(error || new Error(`Empty file for: ${params.path}`));
-          return;
-        }
-        resolve(new Uint8Array(data));
-      });
-    });
+async function fetchBuiltInCMapHelper(binaryDataFactory, cMapPacked, name) {
+  let cMapData = await binaryDataFactory.fetch({
+    kind: "cMapUrl",
+    filename: `${name}${cMapPacked ? ".bcmap.br" : ""}`,
+  });
+  if (cMapPacked) {
+    cMapData = await decodeBrotli(cMapData);
   }
+  return { cMapData, cMapPacked };
 }
-
-const DefaultFileReaderFactory = isNodeJS
-  ? NodeFileReaderFactory
-  : DOMFileReaderFactory;
 
 function buildGetDocumentParams(filename, options) {
   const params = Object.create(null);
@@ -66,6 +67,7 @@ function buildGetDocumentParams(filename, options) {
     ? TEST_PDFS_PATH + filename
     : new URL(TEST_PDFS_PATH + filename, window.location).href;
   params.standardFontDataUrl = STANDARD_FONT_DATA_URL;
+  params.wasmUrl = WASM_URL;
 
   for (const option in options) {
     params[option] = options[option];
@@ -73,34 +75,116 @@ function buildGetDocumentParams(filename, options) {
   return params;
 }
 
+// Builds a PDF file from its objects, with a valid xref table.
+function assemblePdf(objects, trailerEntries = "") {
+  let pdf = "%PDF-1.7\n";
+  const offsets = [];
+  for (const obj of objects) {
+    offsets.push(pdf.length);
+    pdf += obj;
+  }
+  const xrefOffset = pdf.length;
+  pdf += `xref\n0 ${objects.length + 1}\n`;
+  pdf += "0000000000 65535 f \n";
+  for (const offset of offsets) {
+    pdf += `${offset.toString().padStart(10, "0")} 00000 n \n`;
+  }
+  pdf +=
+    `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R ${trailerEntries}>>\n` +
+    `startxref\n${xrefOffset}\n%%EOF\n`;
+  return stringToBytes(pdf);
+}
+
+// Builds a PDF sound object's stream dictionary (ISO 32000-1, 12.5.6.16). Pass
+// a key as `null` to omit it (to exercise defaults/missing entries); pass
+// `type: true` to add the optional `/Type /Sound` entry.
+function createSoundDict({
+  R = 22050,
+  C = 1,
+  B = 16,
+  E = "Signed",
+  CO,
+  type = false,
+} = {}) {
+  const dict = new Dict();
+  if (type) {
+    dict.set("Type", Name.get("Sound"));
+  }
+  if (R !== null) {
+    dict.set("R", R);
+  }
+  if (C !== null) {
+    dict.set("C", C);
+  }
+  if (B !== null) {
+    dict.set("B", B);
+  }
+  if (E !== null) {
+    dict.set("E", Name.get(E));
+  }
+  if (CO) {
+    dict.set("CO", Name.get(CO));
+  }
+  return dict;
+}
+
+function getCrossOriginHostname(hostname) {
+  if (hostname === "localhost") {
+    // Note: This does not work if localhost is listening on IPv6 only.
+    // As a work-around, visit the IPv6 version at:
+    // http://[::1]:8888/test/unit/unit_test.html?spec=Cross-origin
+    return "127.0.0.1";
+  }
+
+  if (hostname === "127.0.0.1" || hostname === "[::1]") {
+    return "localhost";
+  }
+
+  // FQDN are cross-origin and browsers usually resolve them to the same server.
+  return hostname.endsWith(".") ? hostname.slice(0, -1) : hostname + ".";
+}
+
 class XRefMock {
-  constructor(array) {
-    this._map = Object.create(null);
-    this.stats = {
-      streamTypes: Object.create(null),
-      fontTypes: Object.create(null),
-    };
-    this._newRefNum = null;
+  #map = new Map();
 
-    for (const key in array) {
-      const obj = array[key];
-      this._map[obj.ref.toString()] = obj.data;
+  #newPersistentRefNum = null;
+
+  #newTemporaryRefNum = null;
+
+  stream = new NullStream();
+
+  constructor(array = []) {
+    for (const { ref, data } of array) {
+      this.#map.set(ref.toString(), data);
     }
   }
 
-  getNewRef() {
-    if (this._newRefNum === null) {
-      this._newRefNum = Object.keys(this._map).length;
+  getNewPersistentRef(obj) {
+    if (this.#newPersistentRefNum === null) {
+      this.#newPersistentRefNum = this.#map.size || 1;
     }
-    return Ref.get(this._newRefNum++, 0);
+    const ref = Ref.get(this.#newPersistentRefNum++, 0);
+    this.#map.set(ref.toString(), obj);
+    return ref;
   }
 
-  resetNewRef() {
-    this.newRef = null;
+  getNewTemporaryRef() {
+    if (this.#newTemporaryRefNum === null) {
+      this.#newTemporaryRefNum = this.#map.size || 1;
+    }
+    return Ref.get(this.#newTemporaryRefNum++, 0);
+  }
+
+  resetNewTemporaryRef() {
+    this.#newTemporaryRefNum = null;
+  }
+
+  countUpdatesAfter(offset) {
+    return null;
   }
 
   fetch(ref) {
-    return this._map[ref.toString()];
+    return this.#map.get(ref.toString());
   }
 
   async fetchAsync(ref) {
@@ -108,14 +192,33 @@ class XRefMock {
   }
 
   fetchIfRef(obj) {
-    if (!isRef(obj)) {
-      return obj;
-    }
-    return this.fetch(obj);
+    return obj instanceof Ref ? this.fetch(obj) : obj;
   }
 
   async fetchIfRefAsync(obj) {
     return this.fetchIfRef(obj);
+  }
+}
+
+/**
+ * `XRefMock` variant that limits the number of fetches, such that tests
+ * exercising cycle detection fail rather than hang when a guard is missing.
+ */
+class BoundedXRefMock extends XRefMock {
+  #limit;
+
+  fetchCount = 0;
+
+  constructor(array, limit = 100) {
+    super(array);
+    this.#limit = limit;
+  }
+
+  fetch(ref) {
+    if (++this.fetchCount > this.#limit) {
+      throw new Error(`BoundedXRefMock: more than ${this.#limit} fetches.`);
+    }
+    return super.fetch(ref);
   }
 }
 
@@ -137,21 +240,109 @@ function createIdFactory(pageIndex) {
   return page._localIdFactory;
 }
 
-function isEmptyObj(obj) {
-  assert(
-    typeof obj === "object" && obj !== null,
-    "isEmptyObj - invalid argument."
-  );
-  return Object.keys(obj).length === 0;
+// Some tests rely on special behavior from webserver.mjs. When loaded in the
+// browser, the page is already served from WebServer. When running from
+// Node.js, that is not the case. This helper starts the WebServer if needed,
+// and offers a mechanism to resolve the URL in a uniform way.
+class TestPdfsServer {
+  static #webServer;
+
+  static #startCount = 0;
+
+  static #startPromise;
+
+  static async ensureStarted() {
+    if (this.#startCount++) {
+      // Already started before. E.g. from another beforeAll call.
+      return this.#startPromise;
+    }
+    if (!isNodeJS) {
+      // In web browsers, tests are presumably served by webserver.mjs.
+      return undefined;
+    }
+
+    this.#startPromise = this.#startServer().finally(() => {
+      this.#startPromise = null;
+    });
+    return this.#startPromise;
+  }
+
+  static async #startServer() {
+    // WebServer from webserver.mjs is imported dynamically instead of
+    // statically because we do not need it when running from the browser.
+    let WebServer;
+    if (import.meta.url.endsWith("/lib-legacy/test/unit/test_utils.js")) {
+      // When "gulp unittestcli" is used to run tests, the tests are run from
+      // pdf.js/build/lib-legacy/test/ instead of directly from pdf.js/test/.
+      // eslint-disable-next-line import/no-unresolved
+      ({ WebServer } = await import("../../../../test/webserver.mjs"));
+    } else {
+      ({ WebServer } = await import("../webserver.mjs"));
+    }
+    this.#webServer = new WebServer({
+      host: "127.0.0.1",
+      root: TEST_PDFS_PATH,
+    });
+    await new Promise(resolve => {
+      this.#webServer.start(resolve);
+    });
+  }
+
+  static async ensureStopped() {
+    assert(this.#startCount > 0, "ensureStarted() should be called first");
+    assert(!this.#startPromise, "ensureStarted() should have resolved");
+    if (--this.#startCount) {
+      // Keep server alive as long as there is an ensureStarted() that was not
+      // followed by an ensureStopped() call.
+      // This could happen if ensureStarted() was called again before
+      // ensureStopped() was called from afterAll().
+      return;
+    }
+    if (!isNodeJS) {
+      // Web browsers cannot stop the server.
+      return;
+    }
+
+    await new Promise(resolve => {
+      this.#webServer.stop(resolve);
+      this.#webServer = null;
+    });
+  }
+
+  /**
+   * @param {string} path - path to file within test/unit/pdf/ (TEST_PDFS_PATH).
+   * @returns {URL}
+   */
+  static resolveURL(path) {
+    assert(this.#startCount > 0, "ensureStarted() should be called first");
+    assert(!this.#startPromise, "ensureStarted() should have resolved");
+
+    if (isNodeJS) {
+      // Note: TestPdfsServer.ensureStarted() should be called first.
+      return new URL(path, `http://127.0.0.1:${this.#webServer.port}/`);
+    }
+    // When "gulp server" is used, our URL looks like
+    // http://localhost:8888/test/unit/unit_test.html
+    // The PDFs are served from:
+    // http://localhost:8888/test/pdfs/
+    return new URL(TEST_PDFS_PATH + path, window.location);
+  }
 }
 
 export {
+  assemblePdf,
+  BoundedXRefMock,
   buildGetDocumentParams,
-  CMAP_PARAMS,
+  CMAP_URL,
   createIdFactory,
+  createSoundDict,
+  DefaultBinaryDataFactory,
   DefaultFileReaderFactory,
-  isEmptyObj,
+  fetchBuiltInCMapHelper,
+  getCrossOriginHostname,
   STANDARD_FONT_DATA_URL,
   TEST_PDFS_PATH,
+  TestPdfsServer,
+  WASM_URL,
   XRefMock,
 };

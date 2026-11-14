@@ -36,14 +36,14 @@ import {
   $removeChild,
   $setValue,
   $text,
-  XFAAttribute,
-  XFAObjectArray,
-  XmlObject,
-} from "./xfa_object.js";
+} from "./symbol_utils.js";
 import { BindItems, Field, Items, SetProperty, Text } from "./template.js";
 import { createDataNode, searchNode } from "./som.js";
+import { XFAAttribute, XFAObjectArray, XmlObject } from "./xfa_object.js";
 import { NamespaceIds } from "./namespaces.js";
 import { warn } from "../../shared/util.js";
+
+const NS_DATASETS = NamespaceIds.datasets.id;
 
 function createText(content) {
   const node = new Text({});
@@ -55,11 +55,7 @@ class Binder {
   constructor(root) {
     this.root = root;
     this.datasets = root.datasets;
-    if (root.datasets && root.datasets.data) {
-      this.data = root.datasets.data;
-    } else {
-      this.data = new XmlObject(NamespaceIds.datasets.id, "data");
-    }
+    this.data = root.datasets?.data || new XmlObject(NS_DATASETS, "data");
     this.emptyMerge = this.data[$getChildren]().length === 0;
 
     this.root.form = this.form = root.template[$clone]();
@@ -96,9 +92,7 @@ class Binder {
         formNode[$setValue](createText(value));
       } else if (
         formNode instanceof Field &&
-        formNode.ui &&
-        formNode.ui.choiceList &&
-        formNode.ui.choiceList.open === "multiSelect"
+        formNode.ui?.choiceList?.open === "multiSelect"
       ) {
         const value = data[$getChildren]()
           .map(child => child[$content].trim())
@@ -142,7 +136,7 @@ class Binder {
         }
       }
       if (
-        dataNode[$namespaceId] === NamespaceIds.datasets.id &&
+        dataNode[$namespaceId] === NS_DATASETS &&
         dataNode[$nodeName] === "data"
       ) {
         break;
@@ -170,11 +164,7 @@ class Binder {
     // Thirdly, try to find it in attributes.
     generator = this.data[$getAttributeIt](name, /* skipConsumed = */ true);
     match = generator.next().value;
-    if (match && match[$isDataValue]()) {
-      return match;
-    }
-
-    return null;
+    return match?.[$isDataValue]() ? match : null;
   }
 
   _setProperties(formNode, dataNode) {
@@ -185,7 +175,7 @@ class Binder {
     //   <setProperty ref="$data.Main.Help.LastName" target="assist.toolTip"/>
     // </field>
 
-    if (!formNode.hasOwnProperty("setProperty")) {
+    if (!Object.hasOwn(formNode, "setProperty")) {
       return;
     }
 
@@ -270,7 +260,7 @@ class Binder {
         continue;
       }
 
-      if (!targetNode.hasOwnProperty($content)) {
+      if (!Object.hasOwn(targetNode, $content)) {
         warn(`XFA - Invalid node to use in setProperty`);
         continue;
       }
@@ -290,8 +280,8 @@ class Binder {
     // </field>
 
     if (
-      !formNode.hasOwnProperty("items") ||
-      !formNode.hasOwnProperty("bindItems") ||
+      !Object.hasOwn(formNode, "items") ||
+      !Object.hasOwn(formNode, "bindItems") ||
       formNode.bindItems.isEmpty()
     ) {
       return;
@@ -476,6 +466,12 @@ class Binder {
     return [occur.min, max];
   }
 
+  _setAndBind(formNode, dataNode) {
+    this._setProperties(formNode, dataNode);
+    this._bindItems(formNode, dataNode);
+    this._bindElement(formNode, dataNode);
+  }
+
   _bindElement(formNode, dataNode) {
     // Some nodes can be useless because min=0 so remove them
     // after the loop to avoid bad things.
@@ -501,8 +497,12 @@ class Binder {
         if (dataChildren.length > 0) {
           this._bindOccurrences(child, [dataChildren[0]], null);
         } else if (this.emptyMerge) {
+          const nsId =
+            dataNode[$namespaceId] === NS_DATASETS
+              ? -1
+              : dataNode[$namespaceId];
           const dataChild = (child[$data] = new XmlObject(
-            dataNode[$namespaceId],
+            nsId,
             child.name || "root"
           ));
           dataNode[$appendChild](dataChild);
@@ -524,7 +524,7 @@ class Binder {
       if (child.bind) {
         switch (child.bind.match) {
           case "none":
-            this._bindElement(child, dataNode);
+            this._setAndBind(child, dataNode);
             continue;
           case "global":
             global = true;
@@ -532,7 +532,7 @@ class Binder {
           case "dataRef":
             if (!child.bind.ref) {
               warn(`XFA - ref is empty in node ${child[$nodeName]}.`);
-              this._bindElement(child, dataNode);
+              this._setAndBind(child, dataNode);
               continue;
             }
             ref = child.bind.ref;
@@ -572,7 +572,7 @@ class Binder {
           }
 
           // Don't bind the value in newly created node because it's empty.
-          this._bindElement(child, match);
+          this._setAndBind(child, match);
           continue;
         } else {
           if (this._isConsumeData()) {
@@ -592,7 +592,7 @@ class Binder {
         }
       } else {
         if (!child.name) {
-          this._bindElement(child, dataNode);
+          this._setAndBind(child, dataNode);
           continue;
         }
         if (this._isConsumeData()) {
@@ -623,21 +623,27 @@ class Binder {
             /* skipConsumed = */ this.emptyMerge
           ).next().value;
           if (!match) {
+            // If there is no match (no data) and `min === 0` then
+            // the container is entirely excluded.
+            // https://www.pdfa.org/norm-refs/XFA-3_3.pdf#G12.1428332
+            if (min === 0) {
+              uselessNodes.push(child);
+              continue;
+            }
             // We're in matchTemplate mode so create a node in data to reflect
             // what we've in template.
-            match = child[$data] = new XmlObject(
-              dataNode[$namespaceId],
-              child.name
-            );
+            const nsId =
+              dataNode[$namespaceId] === NS_DATASETS
+                ? -1
+                : dataNode[$namespaceId];
+            match = child[$data] = new XmlObject(nsId, child.name);
             if (this.emptyMerge) {
               match[$consumed] = true;
             }
             dataNode[$appendChild](match);
 
             // Don't bind the value in newly created node because it's empty.
-            this._setProperties(child, match);
-            this._bindItems(child, match);
-            this._bindElement(child, match);
+            this._setAndBind(child, match);
             continue;
           }
           if (this.emptyMerge) {
@@ -650,9 +656,7 @@ class Binder {
       if (match) {
         this._bindOccurrences(child, match, picture);
       } else if (min > 0) {
-        this._setProperties(child, dataNode);
-        this._bindItems(child, dataNode);
-        this._bindElement(child, dataNode);
+        this._setAndBind(child, dataNode);
       } else {
         uselessNodes.push(child);
       }

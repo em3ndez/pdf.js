@@ -23,12 +23,12 @@ import {
   $onChild,
   $resolvePrototypes,
   $root,
-  XFAObject,
-} from "./xfa_object.js";
+} from "./symbol_utils.js";
+import { makeArr, warn } from "../../shared/util.js";
 import { NamespaceSetUp } from "./setup.js";
 import { Template } from "./template.js";
 import { UnknownNamespace } from "./unknown.js";
-import { warn } from "../../shared/util.js";
+import { XFAObject } from "./xfa_object.js";
 
 class Root extends XFAObject {
   constructor(ids) {
@@ -66,7 +66,7 @@ class Empty extends XFAObject {
 }
 
 class Builder {
-  constructor() {
+  constructor(rootNameSpace = null) {
     this._namespaceStack = [];
     this._nsAgnosticLevel = 0;
 
@@ -76,7 +76,8 @@ class Builder {
     this._nextNsId = Math.max(
       ...Object.values(NamespaceIds).map(({ id }) => id)
     );
-    this._currentNamespace = new UnknownNamespace(++this._nextNsId);
+    this._currentNamespace =
+      rootNameSpace || new UnknownNamespace(++this._nextNsId);
   }
 
   buildRoot(ids) {
@@ -96,7 +97,7 @@ class Builder {
       this._addNamespacePrefix(prefixes);
     }
 
-    if (attributes.hasOwnProperty($nsAttributes)) {
+    if (Object.hasOwn(attributes, $nsAttributes)) {
       // Only support xfa-data namespace.
       const dataTemplate = NamespaceSetUp.datasets;
       const nsAttrs = attributes[$nsAttributes];
@@ -117,8 +118,7 @@ class Builder {
 
     const namespaceToUse = this._getNamespaceToUse(nsPrefix);
     const node =
-      (namespaceToUse && namespaceToUse[$buildXFAObject](name, attributes)) ||
-      new Empty();
+      namespaceToUse?.[$buildXFAObject](name, attributes) || new Empty();
 
     if (node[$isNsAgnostic]()) {
       this._nsAgnosticLevel++;
@@ -166,12 +166,9 @@ class Builder {
   _addNamespacePrefix(prefixes) {
     for (const { prefix, value } of prefixes) {
       const namespace = this._searchNamespace(value);
-      let prefixStack = this._namespacePrefixes.get(prefix);
-      if (!prefixStack) {
-        prefixStack = [];
-        this._namespacePrefixes.set(prefix, prefixStack);
-      }
-      prefixStack.push(namespace);
+      this._namespacePrefixes
+        .getOrInsertComputed(prefix, makeArr)
+        .push(namespace);
     }
   }
 
@@ -180,8 +177,8 @@ class Builder {
       return this._currentNamespace;
     }
     const prefixStack = this._namespacePrefixes.get(prefix);
-    if (prefixStack && prefixStack.length > 0) {
-      return prefixStack[prefixStack.length - 1];
+    if (prefixStack?.length > 0) {
+      return prefixStack.at(-1);
     }
 
     warn(`Unknown namespace prefix: ${prefix}.`);
@@ -193,11 +190,9 @@ class Builder {
     if (hasNamespace) {
       this._currentNamespace = this._namespaceStack.pop();
     }
-    if (prefixes) {
-      prefixes.forEach(({ prefix }) => {
-        this._namespacePrefixes.get(prefix).pop();
-      });
-    }
+    prefixes?.forEach(({ prefix }) => {
+      this._namespacePrefixes.get(prefix).pop();
+    });
     if (nsAgnostic) {
       this._nsAgnosticLevel--;
     }

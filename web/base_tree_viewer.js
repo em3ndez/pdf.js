@@ -13,18 +13,22 @@
  * limitations under the License.
  */
 
-import { removeNullCharacters } from "pdfjs-lib";
+import { removeNullCharacters } from "./ui_utils.js";
+import { stopEvent } from "pdfjs-lib";
 
-const TREEITEM_OFFSET_TOP = -100; // px
 const TREEITEM_SELECTED_CLASS = "selected";
 
 class BaseTreeViewer {
   constructor(options) {
-    if (this.constructor === BaseTreeViewer) {
+    if (
+      (typeof PDFJSDev === "undefined" || PDFJSDev.test("TESTING")) &&
+      this.constructor === BaseTreeViewer
+    ) {
       throw new Error("Cannot initialize BaseTreeViewer.");
     }
     this.container = options.container;
     this.eventBus = options.eventBus;
+    this._l10n = options.l10n;
 
     this.reset();
   }
@@ -35,21 +39,21 @@ class BaseTreeViewer {
     this._currentTreeItem = null;
 
     // Remove the tree from the DOM.
-    this.container.textContent = "";
+    this.container.replaceChildren();
     // Ensure that the left (right in RTL locales) margin is always reset,
     // to prevent incorrect tree alignment if a new document is opened.
-    this.container.classList.remove("treeWithDeepNesting");
+    this.container.classList.remove("withNesting");
   }
 
   /**
-   * @private
+   * @protected
    */
   _dispatchEvent(count) {
     throw new Error("Not implemented: _dispatchEvent");
   }
 
   /**
-   * @private
+   * @protected
    */
   _bindLink(element, params) {
     throw new Error("Not implemented: _bindLink");
@@ -59,13 +63,20 @@ class BaseTreeViewer {
    * @private
    */
   _normalizeTextContent(str) {
-    return removeNullCharacters(str) || /* en dash = */ "\u2013";
+    // Chars in range [0x01-0x1F] will be replaced with a white space
+    // and 0x00 by "".
+    return (
+      removeNullCharacters(str, /* replaceInvisible */ true) ||
+      /* en dash = */ "\u2013"
+    );
   }
 
   /**
    * Prepend a button before a tree item which allows the user to collapse or
    * expand all tree items at that level; see `_toggleTreeItem`.
-   * @private
+   * @param {HTMLDivElement} div
+   * @param {boolean|object} [hidden]
+   * @protected
    */
   _addToggleButton(div, hidden = false) {
     const toggler = document.createElement("div");
@@ -73,31 +84,25 @@ class BaseTreeViewer {
     if (hidden) {
       toggler.classList.add("treeItemsHidden");
     }
-    toggler.onclick = evt => {
-      evt.stopPropagation();
-      toggler.classList.toggle("treeItemsHidden");
-
-      if (evt.shiftKey) {
-        const shouldShowAll = !toggler.classList.contains("treeItemsHidden");
-        this._toggleTreeItem(div, shouldShowAll);
-      }
-    };
-    div.insertBefore(toggler, div.firstChild);
+    div.prepend(toggler);
   }
 
   /**
    * Collapse or expand the subtree of a tree item.
-   *
    * @param {Element} root - the root of the item (sub)tree.
    * @param {boolean} show - whether to show the item (sub)tree. If false,
    *   the item subtree rooted at `root` will be collapsed.
    * @private
    */
   _toggleTreeItem(root, show = false) {
+    // Pause translation when collapsing/expanding the subtree.
+    this._l10n.pause();
+
     this._lastToggleIsShow = show;
     for (const toggler of root.querySelectorAll(".treeItemToggler")) {
       toggler.classList.toggle("treeItemsHidden", !show);
     }
+    this._l10n.resume();
   }
 
   /**
@@ -113,11 +118,25 @@ class BaseTreeViewer {
    */
   _finishRendering(fragment, count, hasAnyNesting = false) {
     if (hasAnyNesting) {
-      this.container.classList.add("treeWithDeepNesting");
-
+      this.container.classList.add("withNesting");
       this._lastToggleIsShow = !fragment.querySelector(".treeItemsHidden");
+      this.container.addEventListener("click", e => {
+        const { target } = e;
+        if (!target.classList.contains("treeItemToggler")) {
+          return;
+        }
+        stopEvent(e);
+        target.classList.toggle("treeItemsHidden");
+        if (e.shiftKey) {
+          const shouldShowAll = !target.classList.contains("treeItemsHidden");
+          this._toggleTreeItem(target.parentNode, shouldShowAll);
+        }
+      });
     }
-    this.container.appendChild(fragment);
+    // Pause translation when inserting the tree into the DOM.
+    this._l10n.pause();
+    this.container.append(fragment);
+    this._l10n.resume();
 
     this._dispatchEvent(count);
   }
@@ -148,6 +167,8 @@ class BaseTreeViewer {
     if (!treeItem) {
       return;
     }
+    // Pause translation when expanding the treeItem.
+    this._l10n.pause();
     // Ensure that the treeItem is *fully* expanded, such that it will first of
     // all be visible and secondly that scrolling it into view works correctly.
     let currentNode = treeItem.parentNode;
@@ -158,12 +179,16 @@ class BaseTreeViewer {
       }
       currentNode = currentNode.parentNode;
     }
+    this._l10n.resume();
+
     this._updateCurrentTreeItem(treeItem);
 
-    this.container.scrollTo(
-      treeItem.offsetLeft,
-      treeItem.offsetTop + TREEITEM_OFFSET_TOP
-    );
+    treeItem.scrollIntoView({
+      behavior: "instant",
+      block: "center",
+      inline: "center",
+      container: "nearest",
+    });
   }
 }
 

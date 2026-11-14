@@ -13,25 +13,19 @@
  * limitations under the License.
  */
 
-import { isDict, isStream } from "./primitives.js";
-import { stringToPDFString, warn } from "../shared/util.js";
+import {
+  PasswordException,
+  PasswordResponses,
+  stripPath,
+  warn,
+} from "../shared/util.js";
+import { BaseStream } from "./base_stream.js";
+import { Dict } from "./primitives.js";
+import { stringToPDFString } from "./string_utils.js";
 
-function pickPlatformItem(dict) {
-  // Look for the filename in this order:
-  // UF, F, Unix, Mac, DOS
-  if (dict.has("UF")) {
-    return dict.get("UF");
-  } else if (dict.has("F")) {
-    return dict.get("F");
-  } else if (dict.has("Unix")) {
-    return dict.get("Unix");
-  } else if (dict.has("Mac")) {
-    return dict.get("Mac");
-  } else if (dict.has("DOS")) {
-    return dict.get("DOS");
-  }
-  return null;
-}
+/**
+ * @import { CatalogAttachmentContent } from "./catalog.js";
+ */
 
 /**
  * "A PDF file can refer to the contents of another file by using a File
@@ -41,67 +35,123 @@ function pickPlatformItem(dict) {
  * collections attributes and related files (/RF)
  */
 class FileSpec {
-  constructor(root, xref) {
-    if (!root || !isDict(root)) {
+  /**
+   * @param {Dict | null | undefined} root
+   *   File specification dictionary.
+   */
+  constructor(root) {
+    if (!(root instanceof Dict)) {
       return;
     }
-    this.xref = xref;
     this.root = root;
-    if (root.has("FS")) {
-      this.fs = root.get("FS");
-    }
-    this.description = root.has("Desc")
-      ? stringToPDFString(root.get("Desc"))
-      : "";
+
     if (root.has("RF")) {
       warn("Related file specifications are not supported");
-    }
-    this.contentAvailable = true;
-    if (!root.has("EF")) {
-      this.contentAvailable = false;
-      warn("Non-embedded file specifications are not supported");
     }
   }
 
   get filename() {
-    if (!this._filename && this.root) {
-      const filename = pickPlatformItem(this.root) || "unnamed";
-      this._filename = stringToPDFString(filename)
-        .replace(/\\\\/g, "\\")
-        .replace(/\\\//g, "/")
-        .replace(/\\/g, "/");
+    const item = FileSpec.pickPlatformItem(this.root);
+    if (item && typeof item === "string") {
+      // NOTE: The following replacement order is INTENTIONAL, regardless of
+      //       what some static code analysers (e.g. CodeQL) may claim.
+      return stringToPDFString(item, /* keepEscapeSequence = */ true)
+        .replaceAll("\\\\", "\\")
+        .replaceAll("\\/", "/")
+        .replaceAll("\\", "/");
     }
-    return this._filename;
+    return "";
   }
 
-  get content() {
-    if (!this.contentAvailable) {
-      return null;
-    }
-    if (!this.contentRef && this.root) {
-      this.contentRef = pickPlatformItem(this.root.get("EF"));
-    }
-    let content = null;
-    if (this.contentRef) {
-      const fileObj = this.xref.fetchIfRef(this.contentRef);
-      if (fileObj && isStream(fileObj)) {
-        content = fileObj.getBytes();
-      } else {
-        warn(
-          "Embedded file specification points to non-existing/invalid content"
-        );
-      }
-    } else {
-      warn("Embedded file specification does not have a content");
-    }
-    return content;
+  get description() {
+    const desc = this.root?.get("Desc");
+    return desc && typeof desc === "string" ? stringToPDFString(desc) : "";
   }
 
   get serializable() {
+    const { filename, description } = this;
     return {
-      filename: this.filename,
-      content: this.content,
+      rawFilename: filename,
+      filename: stripPath(filename) || "unnamed",
+      description,
     };
+  }
+
+  /**
+   * Get a platform-specific item from a file-spec dictionary.
+   *
+   * Search order follows the PDF platform keys: `UF`, `F`, `Unix`, `Mac`,
+   * `DOS`.
+   * @param {Dict | null | undefined} dict
+   *   Dictionary.
+   * @param {boolean} [raw]
+   *   Return the raw (possibly indirect) value rather than the resolved one.
+   * @returns {unknown}
+   *   Matching dictionary value or `null` when no key is found.
+   */
+  static pickPlatformItem(dict, raw = false) {
+    if (dict instanceof Dict) {
+      // Look for the filename in this order: UF, F, Unix, Mac, DOS
+      for (const key of ["UF", "F", "Unix", "Mac", "DOS"]) {
+        if (dict.has(key)) {
+          return raw ? dict.getRaw(key) : dict.get(key);
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Whether a file specification carries an embedded file we can read.
+   * @param {Dict} fileSpecDict
+   * @returns {boolean}
+   */
+  static hasEmbeddedFile(fileSpecDict) {
+    return this.pickPlatformItem(fileSpecDict.get("EF")) instanceof BaseStream;
+  }
+
+  /**
+   * Read attachment bytes from a file-spec dictionary.
+   * @param {Dict | null | undefined} dict
+   *   File-spec dictionary containing an `EF` entry.
+   * @returns {CatalogAttachmentContent}
+   *   Attachment bytes when available; otherwise `null`.
+   * @throws {PasswordException}
+   *   When attachment bytes are encrypted and no key is available.
+   */
+  static readContent(dict) {
+    if (!(dict instanceof Dict)) {
+      return null;
+    }
+    const ef = this.pickPlatformItem(dict.get("EF"));
+    if (!(ef instanceof BaseStream)) {
+      warn(
+        "Embedded file specification points to non-existing/invalid content"
+      );
+      return null;
+    }
+    return this.readStreamContent(ef);
+  }
+
+  /**
+   * Read the bytes of an embedded-file stream.
+   * @param {BaseStream} stream
+   *   Embedded-file stream.
+   * @returns {CatalogAttachmentContent}
+   *   Attachment bytes.
+   * @throws {PasswordException}
+   *   When the bytes are encrypted and no key is available.
+   */
+  static readStreamContent(stream) {
+    // Throw if we need a password but don’t have one.
+    const encrypt = stream.dict?.xref?.encrypt;
+    if (encrypt?.encryptionKey === null) {
+      throw new PasswordException(
+        "No password given",
+        PasswordResponses.NEED_PASSWORD
+      );
+    }
+    return stream.getBytes();
   }
 }
 

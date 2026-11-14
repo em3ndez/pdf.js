@@ -17,11 +17,12 @@
 // https://github.com/mozilla/shumway/blob/16451d8836fa85f4b16eeda8b4bda2fa9e2b22b0/src/avm2/natives/xml.ts
 
 import { encodeToXmlString } from "./core_utils.js";
+import { shadow } from "../shared/util.js";
 
 const XMLParserErrorCode = {
   NoError: 0,
   EndOfDocument: -1,
-  UnterminatedCdat: -2,
+  UnterminatedCdata: -2,
   UnterminatedXmlDeclaration: -3,
   UnterminatedDoctypeDeclaration: -4,
   UnterminatedComment: -5,
@@ -47,12 +48,18 @@ function isWhitespaceString(s) {
 }
 
 class XMLParserBase {
+  static get _entityRegex() {
+    // Entity references cannot contain "&", keeping the scan linear.
+    return shadow(this, "_entityRegex", /&(?:#x([^;&]+)|#([^;&]+)|([^;&]+));/g);
+  }
+
   _resolveEntities(s) {
-    return s.replace(/&([^;]+);/g, (all, entity) => {
-      if (entity.substring(0, 2) === "#x") {
-        return String.fromCodePoint(parseInt(entity.substring(2), 16));
-      } else if (entity.substring(0, 1) === "#") {
-        return String.fromCodePoint(parseInt(entity.substring(1), 10));
+    return s.replaceAll(XMLParserBase._entityRegex, (all, hex, dec, entity) => {
+      if (hex || dec) {
+        const code = hex ? parseInt(hex, 16) : parseInt(dec, 10);
+        // An out-of-range or unparsable code point is kept as-is, since
+        // `String.fromCodePoint` would throw on it.
+        return code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : all;
       }
       switch (entity) {
         case "lt":
@@ -206,7 +213,7 @@ class XMLParserBase {
             } else if (s.substring(j + 1, j + 8) === "[CDATA[") {
               q = s.indexOf("]]>", j + 8);
               if (q < 0) {
-                this.onError(XMLParserErrorCode.UnterminatedCdat);
+                this.onError(XMLParserErrorCode.UnterminatedCdata);
                 return;
               }
               this.onCdata(s.substring(j + 8, q));
@@ -302,7 +309,7 @@ class SimpleDOMNode {
   }
 
   get firstChild() {
-    return this.childNodes && this.childNodes[0];
+    return this.childNodes?.[0];
   }
 
   get nextSibling() {
@@ -311,32 +318,27 @@ class SimpleDOMNode {
       return undefined;
     }
     const index = childNodes.indexOf(this);
-    if (index === -1) {
-      return undefined;
-    }
-    return childNodes[index + 1];
+    return index === -1 ? undefined : childNodes[index + 1];
   }
 
   get textContent() {
-    if (!this.childNodes) {
-      return this.nodeValue || "";
-    }
-    return this.childNodes
-      .map(function (child) {
-        return child.textContent;
-      })
-      .join("");
+    return !this.childNodes
+      ? this.nodeValue || ""
+      : this.childNodes.map(child => child.textContent).join("");
+  }
+
+  get children() {
+    return this.childNodes || [];
   }
 
   hasChildNodes() {
-    return this.childNodes && this.childNodes.length > 0;
+    return this.childNodes?.length > 0;
   }
 
   /**
    * Search a node in the tree with the given path
    * foo.bar[nnn], i.e. find the nnn-th node named
    * bar under a node named foo.
-   *
    * @param {Array} paths - an array of objects as
    * returned by {parseXFAPath}.
    * @param {number} pos - the current position in
@@ -350,6 +352,11 @@ class SimpleDOMNode {
     }
 
     const component = paths[pos];
+    if (component.name.startsWith("#") && pos < paths.length - 1) {
+      // If it starts with a # then it's a class which is not a concept for
+      // datasets elements (https://www.pdfa.org/norm-refs/XFA-3_3.pdf#page=96).
+      return this.searchNode(paths, pos + 1);
+    }
     const stack = [];
     let node = this;
 
@@ -379,7 +386,7 @@ class SimpleDOMNode {
         }
       }
 
-      if (node.childNodes && node.childNodes.length !== 0) {
+      if (node.childNodes?.length > 0) {
         stack.push([node, 0]);
         node = node.childNodes[0];
       } else if (stack.length === 0) {
@@ -490,13 +497,14 @@ class SimpleXMLParser extends XMLParserBase {
 
   onEndElement(name) {
     this._currentFragment = this._stack.pop() || [];
-    const lastElement = this._currentFragment[this._currentFragment.length - 1];
+    const lastElement = this._currentFragment.at(-1);
     if (!lastElement) {
-      return;
+      return null;
     }
-    for (let i = 0, ii = lastElement.childNodes.length; i < ii; i++) {
-      lastElement.childNodes[i].parentNode = lastElement;
+    for (const childNode of lastElement.childNodes) {
+      childNode.parentNode = lastElement;
     }
+    return lastElement;
   }
 
   onError(code) {

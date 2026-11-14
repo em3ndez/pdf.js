@@ -14,49 +14,70 @@
  */
 
 import { Dict, Name, Ref } from "../../src/core/primitives.js";
+import { FunctionType, PDFFunctionFactory } from "../../src/core/function.js";
+import {
+  GlobalColorSpaceCache,
+  LocalColorSpaceCache,
+} from "../../src/core/image_utils.js";
 import { Stream, StringStream } from "../../src/core/stream.js";
 import { ColorSpace } from "../../src/core/colorspace.js";
-import { LocalColorSpaceCache } from "../../src/core/image_utils.js";
-import { PDFFunctionFactory } from "../../src/core/function.js";
+import { ColorSpaceUtils } from "../../src/core/colorspace_utils.js";
 import { XRefMock } from "./test_utils.js";
 
 describe("colorspace", function () {
   describe("ColorSpace.isDefaultDecode", function () {
     it("should be true if decode is not an array", function () {
-      expect(ColorSpace.isDefaultDecode("string", 0)).toBeTruthy();
+      expect(ColorSpace.isDefaultDecode("string", 0)).toBeTrue();
     });
 
     it("should be true if length of decode array is not correct", function () {
-      expect(ColorSpace.isDefaultDecode([0], 1)).toBeTruthy();
-      expect(ColorSpace.isDefaultDecode([0, 1, 0], 1)).toBeTruthy();
+      expect(ColorSpace.isDefaultDecode([0], 1)).toBeTrue();
+      expect(ColorSpace.isDefaultDecode([0, 1, 0], 1)).toBeTrue();
     });
 
     it("should be true if decode map matches the default decode map", function () {
-      expect(ColorSpace.isDefaultDecode([], 0)).toBeTruthy();
+      expect(ColorSpace.isDefaultDecode([], 0)).toBeTrue();
 
-      expect(ColorSpace.isDefaultDecode([0, 0], 1)).toBeFalsy();
-      expect(ColorSpace.isDefaultDecode([0, 1], 1)).toBeTruthy();
+      expect(ColorSpace.isDefaultDecode([0, 0], 1)).toBeFalse();
+      expect(ColorSpace.isDefaultDecode([0, 1], 1)).toBeTrue();
 
-      expect(ColorSpace.isDefaultDecode([0, 1, 0, 1, 0, 1], 3)).toBeTruthy();
-      expect(ColorSpace.isDefaultDecode([0, 1, 0, 1, 1, 1], 3)).toBeFalsy();
+      expect(ColorSpace.isDefaultDecode([0, 1, 0, 1, 0, 1], 3)).toBeTrue();
+      expect(ColorSpace.isDefaultDecode([0, 1, 0, 1, 1, 1], 3)).toBeFalse();
 
       expect(
         ColorSpace.isDefaultDecode([0, 1, 0, 1, 0, 1, 0, 1], 4)
-      ).toBeTruthy();
+      ).toBeTrue();
       expect(
         ColorSpace.isDefaultDecode([1, 0, 0, 1, 0, 1, 0, 1], 4)
-      ).toBeFalsy();
+      ).toBeFalse();
+    });
+  });
+
+  describe("ColorSpace.getRgbItems", function () {
+    it("should honor the destination offset and alpha stride", function () {
+      const src = new Float32Array([0, 0.25, 0.5, 1, 0.75, 0.5, 0.1, 0.2, 0.3]);
+      const dest = new Uint8ClampedArray(14).fill(9);
+
+      ColorSpaceUtils.rgb.getRgbItems(src, 3, dest, 1, /* alpha01 = */ 1);
+
+      expect(dest).toEqual(
+        new Uint8ClampedArray([
+          9, 0, 64, 128, 9, 255, 191, 128, 9, 26, 51, 77, 9, 9,
+        ])
+      );
     });
   });
 
   describe("ColorSpace caching", function () {
-    let localColorSpaceCache = null;
+    let globalColorSpaceCache, localColorSpaceCache;
 
     beforeAll(function () {
+      globalColorSpaceCache = new GlobalColorSpaceCache();
       localColorSpaceCache = new LocalColorSpaceCache();
     });
 
     afterAll(function () {
+      globalColorSpaceCache = null;
       localColorSpaceCache = null;
     });
 
@@ -66,38 +87,42 @@ describe("colorspace", function () {
         xref,
       });
 
-      const colorSpace1 = ColorSpace.parse({
+      const colorSpace1 = ColorSpaceUtils.parse({
         cs: Name.get("Pattern"),
         xref,
         resources: null,
         pdfFunctionFactory,
+        globalColorSpaceCache,
         localColorSpaceCache,
       });
       expect(colorSpace1.name).toEqual("Pattern");
 
-      const colorSpace2 = ColorSpace.parse({
+      const colorSpace2 = ColorSpaceUtils.parse({
         cs: Name.get("Pattern"),
         xref,
         resources: null,
         pdfFunctionFactory,
+        globalColorSpaceCache,
         localColorSpaceCache,
       });
       expect(colorSpace2.name).toEqual("Pattern");
 
-      const colorSpaceNonCached = ColorSpace.parse({
+      const colorSpaceNonCached = ColorSpaceUtils.parse({
         cs: Name.get("Pattern"),
         xref,
         resources: null,
         pdfFunctionFactory,
+        globalColorSpaceCache: new GlobalColorSpaceCache(),
         localColorSpaceCache: new LocalColorSpaceCache(),
       });
       expect(colorSpaceNonCached.name).toEqual("Pattern");
 
-      const colorSpaceOther = ColorSpace.parse({
+      const colorSpaceOther = ColorSpaceUtils.parse({
         cs: Name.get("RGB"),
         xref,
         resources: null,
         pdfFunctionFactory,
+        globalColorSpaceCache,
         localColorSpaceCache,
       });
       expect(colorSpaceOther.name).toEqual("DeviceRGB");
@@ -135,38 +160,42 @@ describe("colorspace", function () {
         xref,
       });
 
-      const colorSpace1 = ColorSpace.parse({
+      const colorSpace1 = ColorSpaceUtils.parse({
         cs: Ref.get(50, 0),
         xref,
         resources: null,
         pdfFunctionFactory,
+        globalColorSpaceCache,
         localColorSpaceCache,
       });
       expect(colorSpace1.name).toEqual("CalGray");
 
-      const colorSpace2 = ColorSpace.parse({
+      const colorSpace2 = ColorSpaceUtils.parse({
         cs: Ref.get(50, 0),
         xref,
         resources: null,
         pdfFunctionFactory,
+        globalColorSpaceCache,
         localColorSpaceCache,
       });
       expect(colorSpace2.name).toEqual("CalGray");
 
-      const colorSpaceNonCached = ColorSpace.parse({
+      const colorSpaceNonCached = ColorSpaceUtils.parse({
         cs: Ref.get(50, 0),
         xref,
         resources: null,
         pdfFunctionFactory,
+        globalColorSpaceCache: new GlobalColorSpaceCache(),
         localColorSpaceCache: new LocalColorSpaceCache(),
       });
       expect(colorSpaceNonCached.name).toEqual("CalGray");
 
-      const colorSpaceOther = ColorSpace.parse({
+      const colorSpaceOther = ColorSpaceUtils.parse({
         cs: Ref.get(100, 0),
         xref,
         resources: null,
         pdfFunctionFactory,
+        globalColorSpaceCache,
         localColorSpaceCache,
       });
       expect(colorSpaceOther.name).toEqual("CalRGB");
@@ -180,6 +209,16 @@ describe("colorspace", function () {
   });
 
   describe("DeviceGrayCS", function () {
+    let globalColorSpaceCache;
+
+    beforeAll(function () {
+      globalColorSpaceCache = new GlobalColorSpaceCache();
+    });
+
+    afterAll(function () {
+      globalColorSpaceCache = null;
+    });
+
     it("should handle the case when cs is a Name object", function () {
       const cs = Name.get("DeviceGray");
       const xref = new XRefMock([
@@ -193,11 +232,12 @@ describe("colorspace", function () {
       const pdfFunctionFactory = new PDFFunctionFactory({
         xref,
       });
-      const colorSpace = ColorSpace.parse({
+      const colorSpace = ColorSpaceUtils.parse({
         cs,
         xref,
         resources,
         pdfFunctionFactory,
+        globalColorSpaceCache,
         localColorSpaceCache: new LocalColorSpaceCache(),
       });
 
@@ -227,8 +267,7 @@ describe("colorspace", function () {
       expect(colorSpace.getRgb(new Float32Array([0.1]), 0)).toEqual(
         new Uint8ClampedArray([26, 26, 26])
       );
-      expect(colorSpace.getOutputLength(2, 0)).toEqual(6);
-      expect(colorSpace.isPassthrough(8)).toBeFalsy();
+      expect(colorSpace.isPassthrough(8)).toBeFalse();
       expect(testDest).toEqual(expectedDest);
     });
     it("should handle the case when cs is an indirect object", function () {
@@ -244,11 +283,12 @@ describe("colorspace", function () {
       const pdfFunctionFactory = new PDFFunctionFactory({
         xref,
       });
-      const colorSpace = ColorSpace.parse({
+      const colorSpace = ColorSpaceUtils.parse({
         cs,
         xref,
         resources,
         pdfFunctionFactory,
+        globalColorSpaceCache,
         localColorSpaceCache: new LocalColorSpaceCache(),
       });
 
@@ -271,13 +311,22 @@ describe("colorspace", function () {
       expect(colorSpace.getRgb(new Float32Array([0.2]), 0)).toEqual(
         new Uint8ClampedArray([51, 51, 51])
       );
-      expect(colorSpace.getOutputLength(3, 1)).toEqual(12);
-      expect(colorSpace.isPassthrough(8)).toBeFalsy();
+      expect(colorSpace.isPassthrough(8)).toBeFalse();
       expect(testDest).toEqual(expectedDest);
     });
   });
 
   describe("DeviceRgbCS", function () {
+    let globalColorSpaceCache;
+
+    beforeAll(function () {
+      globalColorSpaceCache = new GlobalColorSpaceCache();
+    });
+
+    afterAll(function () {
+      globalColorSpaceCache = null;
+    });
+
     it("should handle the case when cs is a Name object", function () {
       const cs = Name.get("DeviceRGB");
       const xref = new XRefMock([
@@ -291,11 +340,12 @@ describe("colorspace", function () {
       const pdfFunctionFactory = new PDFFunctionFactory({
         xref,
       });
-      const colorSpace = ColorSpace.parse({
+      const colorSpace = ColorSpaceUtils.parse({
         cs,
         xref,
         resources,
         pdfFunctionFactory,
+        globalColorSpaceCache,
         localColorSpaceCache: new LocalColorSpaceCache(),
       });
 
@@ -331,8 +381,7 @@ describe("colorspace", function () {
       expect(colorSpace.getRgb(new Float32Array([0.1, 0.2, 0.3]), 0)).toEqual(
         new Uint8ClampedArray([26, 51, 77])
       );
-      expect(colorSpace.getOutputLength(4, 0)).toEqual(4);
-      expect(colorSpace.isPassthrough(8)).toBeTruthy();
+      expect(colorSpace.isPassthrough(8)).toBeTrue();
       expect(testDest).toEqual(expectedDest);
     });
     it("should handle the case when cs is an indirect object", function () {
@@ -348,11 +397,12 @@ describe("colorspace", function () {
       const pdfFunctionFactory = new PDFFunctionFactory({
         xref,
       });
-      const colorSpace = ColorSpace.parse({
+      const colorSpace = ColorSpaceUtils.parse({
         cs,
         xref,
         resources,
         pdfFunctionFactory,
+        globalColorSpaceCache,
         localColorSpaceCache: new LocalColorSpaceCache(),
       });
 
@@ -381,13 +431,45 @@ describe("colorspace", function () {
       expect(colorSpace.getRgb(new Float32Array([0.1, 0.2, 0.3]), 0)).toEqual(
         new Uint8ClampedArray([26, 51, 77])
       );
-      expect(colorSpace.getOutputLength(4, 1)).toEqual(5);
-      expect(colorSpace.isPassthrough(8)).toBeTruthy();
+      expect(colorSpace.isPassthrough(8)).toBeTrue();
       expect(testDest).toEqual(expectedDest);
+    });
+
+    it("should upscale images wider than 21845 pixels", function () {
+      const xref = new XRefMock();
+      const colorSpace = ColorSpaceUtils.parse({
+        cs: Name.get("DeviceRGB"),
+        xref,
+        resources: new Dict(),
+        pdfFunctionFactory: new PDFFunctionFactory({ xref }),
+        globalColorSpaceCache,
+        localColorSpaceCache: new LocalColorSpaceCache(),
+      });
+
+      // The last source pixel starts at byte offset 65997 (> 65535).
+      const width = 22000;
+      const testSrc = new Uint8Array(width * 3);
+      testSrc.set([10, 20, 30], (width - 1) * 3);
+      const testDest = new Uint8ClampedArray((width + 1) * 3);
+      colorSpace.fillRgb(testDest, width, 1, width + 1, 1, 1, 8, testSrc, 0);
+
+      expect(testDest.subarray(-6)).toEqual(
+        new Uint8ClampedArray([0, 0, 0, 10, 20, 30])
+      );
     });
   });
 
   describe("DeviceCmykCS", function () {
+    let globalColorSpaceCache;
+
+    beforeAll(function () {
+      globalColorSpaceCache = new GlobalColorSpaceCache();
+    });
+
+    afterAll(function () {
+      globalColorSpaceCache = null;
+    });
+
     it("should handle the case when cs is a Name object", function () {
       const cs = Name.get("DeviceCMYK");
       const xref = new XRefMock([
@@ -401,11 +483,12 @@ describe("colorspace", function () {
       const pdfFunctionFactory = new PDFFunctionFactory({
         xref,
       });
-      const colorSpace = ColorSpace.parse({
+      const colorSpace = ColorSpaceUtils.parse({
         cs,
         xref,
         resources,
         pdfFunctionFactory,
+        globalColorSpaceCache,
         localColorSpaceCache: new LocalColorSpaceCache(),
       });
 
@@ -441,8 +524,7 @@ describe("colorspace", function () {
       expect(
         colorSpace.getRgb(new Float32Array([0.1, 0.2, 0.3, 1]), 0)
       ).toEqual(new Uint8ClampedArray([32, 28, 21]));
-      expect(colorSpace.getOutputLength(4, 0)).toEqual(3);
-      expect(colorSpace.isPassthrough(8)).toBeFalsy();
+      expect(colorSpace.isPassthrough(8)).toBeFalse();
       expect(testDest).toEqual(expectedDest);
     });
     it("should handle the case when cs is an indirect object", function () {
@@ -458,11 +540,12 @@ describe("colorspace", function () {
       const pdfFunctionFactory = new PDFFunctionFactory({
         xref,
       });
-      const colorSpace = ColorSpace.parse({
+      const colorSpace = ColorSpaceUtils.parse({
         cs,
         xref,
         resources,
         pdfFunctionFactory,
+        globalColorSpaceCache,
         localColorSpaceCache: new LocalColorSpaceCache(),
       });
 
@@ -491,13 +574,22 @@ describe("colorspace", function () {
       expect(
         colorSpace.getRgb(new Float32Array([0.1, 0.2, 0.3, 1]), 0)
       ).toEqual(new Uint8ClampedArray([32, 28, 21]));
-      expect(colorSpace.getOutputLength(4, 1)).toEqual(4);
-      expect(colorSpace.isPassthrough(8)).toBeFalsy();
+      expect(colorSpace.isPassthrough(8)).toBeFalse();
       expect(testDest).toEqual(expectedDest);
     });
   });
 
   describe("CalGrayCS", function () {
+    let globalColorSpaceCache;
+
+    beforeAll(function () {
+      globalColorSpaceCache = new GlobalColorSpaceCache();
+    });
+
+    afterAll(function () {
+      globalColorSpaceCache = null;
+    });
+
     it("should handle the case when cs is an array", function () {
       const params = new Dict();
       params.set("WhitePoint", [1, 1, 1]);
@@ -516,11 +608,12 @@ describe("colorspace", function () {
       const pdfFunctionFactory = new PDFFunctionFactory({
         xref,
       });
-      const colorSpace = ColorSpace.parse({
+      const colorSpace = ColorSpaceUtils.parse({
         cs,
         xref,
         resources,
         pdfFunctionFactory,
+        globalColorSpaceCache,
         localColorSpaceCache: new LocalColorSpaceCache(),
       });
 
@@ -550,13 +643,22 @@ describe("colorspace", function () {
       expect(colorSpace.getRgb(new Float32Array([1.0]), 0)).toEqual(
         new Uint8ClampedArray([255, 255, 255])
       );
-      expect(colorSpace.getOutputLength(4, 0)).toEqual(12);
-      expect(colorSpace.isPassthrough(8)).toBeFalsy();
+      expect(colorSpace.isPassthrough(8)).toBeFalse();
       expect(testDest).toEqual(expectedDest);
     });
   });
 
   describe("CalRGBCS", function () {
+    let globalColorSpaceCache;
+
+    beforeAll(function () {
+      globalColorSpaceCache = new GlobalColorSpaceCache();
+    });
+
+    afterAll(function () {
+      globalColorSpaceCache = null;
+    });
+
     it("should handle the case when cs is an array", function () {
       const params = new Dict();
       params.set("WhitePoint", [1, 1, 1]);
@@ -576,11 +678,12 @@ describe("colorspace", function () {
       const pdfFunctionFactory = new PDFFunctionFactory({
         xref,
       });
-      const colorSpace = ColorSpace.parse({
+      const colorSpace = ColorSpaceUtils.parse({
         cs,
         xref,
         resources,
         pdfFunctionFactory,
+        globalColorSpaceCache,
         localColorSpaceCache: new LocalColorSpaceCache(),
       });
 
@@ -609,13 +712,22 @@ describe("colorspace", function () {
       expect(colorSpace.getRgb(new Float32Array([0.1, 0.2, 0.3]), 0)).toEqual(
         new Uint8ClampedArray([0, 147, 151])
       );
-      expect(colorSpace.getOutputLength(4, 0)).toEqual(4);
-      expect(colorSpace.isPassthrough(8)).toBeFalsy();
+      expect(colorSpace.isPassthrough(8)).toBeFalse();
       expect(testDest).toEqual(expectedDest);
     });
   });
 
   describe("LabCS", function () {
+    let globalColorSpaceCache;
+
+    beforeAll(function () {
+      globalColorSpaceCache = new GlobalColorSpaceCache();
+    });
+
+    afterAll(function () {
+      globalColorSpaceCache = null;
+    });
+
     it("should handle the case when cs is an array", function () {
       const params = new Dict();
       params.set("WhitePoint", [1, 1, 1]);
@@ -634,11 +746,12 @@ describe("colorspace", function () {
       const pdfFunctionFactory = new PDFFunctionFactory({
         xref,
       });
-      const colorSpace = ColorSpace.parse({
+      const colorSpace = ColorSpaceUtils.parse({
         cs,
         xref,
         resources,
         pdfFunctionFactory,
+        globalColorSpaceCache,
         localColorSpaceCache: new LocalColorSpaceCache(),
       });
 
@@ -667,14 +780,23 @@ describe("colorspace", function () {
       expect(colorSpace.getRgb([55, 25, 35], 0)).toEqual(
         new Uint8ClampedArray([188, 100, 61])
       );
-      expect(colorSpace.getOutputLength(4, 0)).toEqual(4);
-      expect(colorSpace.isPassthrough(8)).toBeFalsy();
-      expect(colorSpace.isDefaultDecode([0, 1])).toBeTruthy();
+      expect(colorSpace.isPassthrough(8)).toBeFalse();
+      expect(colorSpace.isDefaultDecode([0, 1])).toBeTrue();
       expect(testDest).toEqual(expectedDest);
     });
   });
 
   describe("IndexedCS", function () {
+    let globalColorSpaceCache;
+
+    beforeAll(function () {
+      globalColorSpaceCache = new GlobalColorSpaceCache();
+    });
+
+    afterAll(function () {
+      globalColorSpaceCache = null;
+    });
+
     it("should handle the case when cs is an array", function () {
       // prettier-ignore
       const lookup = new Stream(
@@ -696,11 +818,12 @@ describe("colorspace", function () {
       const pdfFunctionFactory = new PDFFunctionFactory({
         xref,
       });
-      const colorSpace = ColorSpace.parse({
+      const colorSpace = ColorSpaceUtils.parse({
         cs,
         xref,
         resources,
         pdfFunctionFactory,
+        globalColorSpaceCache,
         localColorSpaceCache: new LocalColorSpaceCache(),
       });
 
@@ -723,28 +846,73 @@ describe("colorspace", function () {
       expect(colorSpace.getRgb([2], 0)).toEqual(
         new Uint8ClampedArray([255, 109, 70])
       );
-      expect(colorSpace.isPassthrough(8)).toBeFalsy();
-      expect(colorSpace.isDefaultDecode([0, 1], 1)).toBeTruthy();
+      expect(colorSpace.isPassthrough(8)).toBeFalse();
+      expect(colorSpace.isDefaultDecode([0, 1], 1)).toBeTrue();
+      expect(testDest).toEqual(expectedDest);
+    });
+
+    it("should downscale images wider than 21845 pixels", function () {
+      // prettier-ignore
+      const lookup = new Stream(
+        new Uint8Array([
+          23, 155, 35,
+          147, 69, 93,
+          255, 109, 70
+        ])
+      );
+      const xref = new XRefMock();
+      const colorSpace = ColorSpaceUtils.parse({
+        cs: [Name.get("Indexed"), Name.get("DeviceRGB"), 2, lookup],
+        xref,
+        resources: new Dict(),
+        pdfFunctionFactory: new PDFFunctionFactory({ xref }),
+        globalColorSpaceCache,
+        localColorSpaceCache: new LocalColorSpaceCache(),
+      });
+
+      // RGB byte offsets: 0, 60000, 120000. Only the last exceeds 65535.
+      const width = 60000;
+      const testSrc = new Uint8Array(width);
+      testSrc.fill(1, 20000, 40000);
+      testSrc.fill(2, 40000);
+      const testDest = new Uint8ClampedArray(3 * 4);
+      // prettier-ignore
+      const expectedDest = new Uint8ClampedArray([
+        23, 155, 35, 0,
+        147, 69, 93, 0,
+        255, 109, 70, 0,
+      ]);
+      colorSpace.fillRgb(testDest, width, 1, 3, 1, 1, 8, testSrc, 1);
+
       expect(testDest).toEqual(expectedDest);
     });
   });
 
   describe("AlternateCS", function () {
+    let globalColorSpaceCache;
+
+    beforeAll(function () {
+      globalColorSpaceCache = new GlobalColorSpaceCache();
+    });
+
+    afterAll(function () {
+      globalColorSpaceCache = null;
+    });
+
     it("should handle the case when cs is an array", function () {
       const fnDict = new Dict();
-      fnDict.set("FunctionType", 4);
+      fnDict.set("FunctionType", FunctionType.POSTSCRIPT_CALCULATOR);
       fnDict.set("Domain", [0.0, 1.0]);
       fnDict.set("Range", [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
       fnDict.set("Length", 58);
 
-      let fn = new StringStream(
+      const fn = new StringStream(
         "{ dup 0.84 mul " +
           "exch 0.00 exch " +
           "dup 0.44 mul " +
-          "exch 0.21 mul }"
+          "exch 0.21 mul }",
+        fnDict
       );
-      fn = new Stream(fn.bytes, 0, 58, fnDict);
-
       const fnRef = Ref.get(10, 0);
 
       const cs = [
@@ -764,11 +932,12 @@ describe("colorspace", function () {
       const pdfFunctionFactory = new PDFFunctionFactory({
         xref,
       });
-      const colorSpace = ColorSpace.parse({
+      const colorSpace = ColorSpaceUtils.parse({
         cs,
         xref,
         resources,
         pdfFunctionFactory,
+        globalColorSpaceCache,
         localColorSpaceCache: new LocalColorSpaceCache(),
       });
 
@@ -791,9 +960,62 @@ describe("colorspace", function () {
       expect(colorSpace.getRgb([0.1], 0)).toEqual(
         new Uint8ClampedArray([228, 243, 242])
       );
-      expect(colorSpace.isPassthrough(8)).toBeFalsy();
-      expect(colorSpace.isDefaultDecode([0, 1])).toBeTruthy();
+      expect(colorSpace.isPassthrough(8)).toBeFalse();
+      expect(colorSpace.isDefaultDecode([0, 1])).toBeTrue();
       expect(testDest).toEqual(expectedDest);
+    });
+
+    it("should handle a sampled function with a degenerate Domain", function () {
+      const fnDict = new Dict();
+      fnDict.set("FunctionType", FunctionType.SAMPLED);
+      fnDict.set("Domain", [0, 1, 0, 0, 0, 1]);
+      fnDict.set("Range", [0, 1, 0, 1, 0, 1, 0, 1]);
+      fnDict.set("Size", [2, 2, 2]);
+      fnDict.set("BitsPerSample", 8);
+
+      // Samples are ordered with the first input varying fastest, i.e.
+      // index = spot + 2 * (none + 2 * black); the /None input has no effect.
+      const samples = [];
+      for (let index = 0; index < 8; index++) {
+        const spot = index & 1;
+        const black = (index >> 2) & 1;
+        samples.push(spot * 255, spot * 51, spot * 184, black * 255);
+      }
+      const fnRef = Ref.get(10, 0);
+      const fn = new Stream(new Uint8Array(samples), 0, samples.length, fnDict);
+
+      const cs = [
+        Name.get("DeviceN"),
+        [Name.get("Spot"), Name.get("None"), Name.get("Black")],
+        Name.get("DeviceCMYK"),
+        fnRef,
+      ];
+      const xref = new XRefMock([
+        {
+          ref: fnRef,
+          data: fn,
+        },
+      ]);
+      const resources = new Dict();
+
+      const pdfFunctionFactory = new PDFFunctionFactory({
+        xref,
+      });
+      const colorSpace = ColorSpaceUtils.parse({
+        cs,
+        xref,
+        resources,
+        pdfFunctionFactory,
+        globalColorSpaceCache,
+        localColorSpaceCache: new LocalColorSpaceCache(),
+      });
+
+      expect(colorSpace.getRgb([0.5, 0, 0], 0)).toEqual(
+        new Uint8ClampedArray([123, 195, 175])
+      );
+      expect(colorSpace.getRgb([0, 0, 1], 0)).toEqual(
+        new Uint8ClampedArray([44, 46, 53])
+      );
     });
   });
 });

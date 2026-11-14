@@ -13,7 +13,6 @@
  * limitations under the License.
  */
 
-import { isEmptyObj } from "./test_utils.js";
 import { Metadata } from "../../src/display/metadata.js";
 import { MetadataParser } from "../../src/core/metadata_parser.js";
 
@@ -32,13 +31,10 @@ describe("metadata", function () {
       "</rdf:Alt></dc:title></rdf:Description></rdf:RDF></x:xmpmeta>";
     const metadata = createMetadata(data);
 
-    expect(metadata.has("dc:title")).toBeTruthy();
-    expect(metadata.has("dc:qux")).toBeFalsy();
-
     expect(metadata.get("dc:title")).toEqual("Foo bar baz");
-    expect(metadata.get("dc:qux")).toEqual(null);
+    expect(metadata.get("dc:qux")).toBeNull();
 
-    expect(metadata.getAll()).toEqual({ "dc:title": "Foo bar baz" });
+    expect([...metadata]).toEqual([["dc:title", "Foo bar baz"]]);
   });
 
   it("should repair and handle invalid metadata", function () {
@@ -50,13 +46,10 @@ describe("metadata", function () {
       "</rdf:Description></rdf:RDF></x:xmpmeta>";
     const metadata = createMetadata(data);
 
-    expect(metadata.has("dc:title")).toBeTruthy();
-    expect(metadata.has("dc:qux")).toBeFalsy();
-
     expect(metadata.get("dc:title")).toEqual("PDF&");
-    expect(metadata.get("dc:qux")).toEqual(null);
+    expect(metadata.get("dc:qux")).toBeNull();
 
-    expect(metadata.getAll()).toEqual({ "dc:title": "PDF&" });
+    expect([...metadata]).toEqual([["dc:title", "PDF&"]]);
   });
 
   it("should repair and handle invalid metadata (bug 1424938)", function () {
@@ -93,19 +86,16 @@ describe("metadata", function () {
       "</x:xmpmeta>";
     const metadata = createMetadata(data);
 
-    expect(metadata.has("dc:title")).toBeTruthy();
-    expect(metadata.has("dc:qux")).toBeFalsy();
-
     expect(metadata.get("dc:title")).toEqual(
       "L'Odissee thématique logo Odisséé - décembre 2008.pub"
     );
-    expect(metadata.get("dc:qux")).toEqual(null);
+    expect(metadata.get("dc:qux")).toBeNull();
 
-    expect(metadata.getAll()).toEqual({
-      "dc:creator": ["ODIS"],
-      "dc:title": "L'Odissee thématique logo Odisséé - décembre 2008.pub",
-      "xap:creatortool": "PDFCreator Version 0.9.6",
-    });
+    expect([...metadata].sort()).toEqual([
+      ["dc:creator", ["ODIS"]],
+      ["dc:title", "L'Odissee thématique logo Odisséé - décembre 2008.pub"],
+      ["xap:creatortool", "PDFCreator Version 0.9.6"],
+    ]);
   });
 
   it("should gracefully handle incomplete tags (issue 8884)", function () {
@@ -136,7 +126,7 @@ describe("metadata", function () {
       '<?xpacket end="w"?>';
     const metadata = createMetadata(data);
 
-    expect(isEmptyObj(metadata.getAll())).toEqual(true);
+    expect([...metadata]).toEqual([]);
   });
 
   it('should gracefully handle "junk" before the actual metadata (issue 10395)', function () {
@@ -167,26 +157,23 @@ describe("metadata", function () {
       '</rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>';
     const metadata = createMetadata(data);
 
-    expect(metadata.has("dc:title")).toBeTruthy();
-    expect(metadata.has("dc:qux")).toBeFalsy();
-
     expect(metadata.get("dc:title")).toEqual("");
-    expect(metadata.get("dc:qux")).toEqual(null);
+    expect(metadata.get("dc:qux")).toBeNull();
 
-    expect(metadata.getAll()).toEqual({
-      "dc:creator": [""],
-      "dc:description": "",
-      "dc:format": "application/pdf",
-      "dc:subject": [],
-      "dc:title": "",
-      "pdf:keywords": "",
-      "pdf:pdfversion": "1.7",
-      "pdf:producer": "PDFKit.NET 4.0.102.0",
-      "xap:createdate": "2018-12-27T13:50:36-08:00",
-      "xap:creatortool": "",
-      "xap:metadatadate": "2018-12-27T13:50:38-08:00",
-      "xap:modifydate": "2018-12-27T13:50:38-08:00",
-    });
+    expect([...metadata].sort()).toEqual([
+      ["dc:creator", [""]],
+      ["dc:description", ""],
+      ["dc:format", "application/pdf"],
+      ["dc:subject", []],
+      ["dc:title", ""],
+      ["pdf:keywords", ""],
+      ["pdf:pdfversion", "1.7"],
+      ["pdf:producer", "PDFKit.NET 4.0.102.0"],
+      ["xap:createdate", "2018-12-27T13:50:36-08:00"],
+      ["xap:creatortool", ""],
+      ["xap:metadatadate", "2018-12-27T13:50:38-08:00"],
+      ["xap:modifydate", "2018-12-27T13:50:38-08:00"],
+    ]);
   });
 
   it('should correctly handle metadata containing "&apos" (issue 10407)', function () {
@@ -199,13 +186,10 @@ describe("metadata", function () {
       "</rdf:Alt></dc:title></rdf:Description></rdf:RDF></x:xmpmeta>";
     const metadata = createMetadata(data);
 
-    expect(metadata.has("dc:title")).toBeTruthy();
-    expect(metadata.has("dc:qux")).toBeFalsy();
-
     expect(metadata.get("dc:title")).toEqual("'Foo bar baz'");
-    expect(metadata.get("dc:qux")).toEqual(null);
+    expect(metadata.get("dc:qux")).toBeNull();
 
-    expect(metadata.getAll()).toEqual({ "dc:title": "'Foo bar baz'" });
+    expect([...metadata]).toEqual([["dc:title", "'Foo bar baz'"]]);
   });
 
   it("should gracefully handle unbalanced end tags (issue 10410)", function () {
@@ -228,7 +212,7 @@ describe("metadata", function () {
       '</rdf:RDF></x:xmpmeta><?xpacket end="w"?>';
     const metadata = createMetadata(data);
 
-    expect(isEmptyObj(metadata.getAll())).toEqual(true);
+    expect([...metadata]).toEqual([]);
   });
 
   it("should not be vulnerable to the billion laughs attack", function () {
@@ -257,12 +241,9 @@ describe("metadata", function () {
       "</rdf:RDF>";
     const metadata = createMetadata(data);
 
-    expect(metadata.has("dc:title")).toBeTruthy();
-    expect(metadata.has("dc:qux")).toBeFalsy();
-
     expect(metadata.get("dc:title")).toEqual("a&lol9;b");
-    expect(metadata.get("dc:qux")).toEqual(null);
+    expect(metadata.get("dc:qux")).toBeNull();
 
-    expect(metadata.getAll()).toEqual({ "dc:title": "a&lol9;b" });
+    expect([...metadata]).toEqual([["dc:title", "a&lol9;b"]]);
   });
 });

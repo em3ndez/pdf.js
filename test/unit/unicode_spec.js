@@ -14,16 +14,15 @@
  */
 
 import {
-  getDingbatsGlyphsUnicode,
-  getGlyphsUnicode,
-} from "../../src/core/glyphlist.js";
-import {
-  getNormalizedUnicodes,
+  getCharUnicodeCategory,
   getUnicodeForGlyph,
   getUnicodeRangeFor,
   mapSpecialUnicodeValues,
-  reverseIfRtl,
 } from "../../src/core/unicode.js";
+import {
+  getDingbatsGlyphsUnicode,
+  getGlyphsUnicode,
+} from "../../src/core/glyphlist.js";
 
 describe("unicode", function () {
   describe("mapSpecialUnicodeValues", function () {
@@ -37,8 +36,124 @@ describe("unicode", function () {
     it("should re-map special Unicode values", function () {
       // copyrightsans => copyright
       expect(mapSpecialUnicodeValues(0xf8e9)).toEqual(0x00a9);
+      // braceex => curly bracket extension
+      expect(mapSpecialUnicodeValues(0xf8f4)).toEqual(0x23aa);
       // Private Use Area characters
       expect(mapSpecialUnicodeValues(0xffff)).toEqual(0);
+    });
+  });
+
+  describe("getCharUnicodeCategory", function () {
+    it("should correctly determine the character category", function () {
+      const tests = {
+        // Whitespace
+        " ": {
+          isZeroWidthDiacritic: false,
+          isInvisibleFormatMark: false,
+          isWhitespace: true,
+        },
+        "\t": {
+          isZeroWidthDiacritic: false,
+          isInvisibleFormatMark: false,
+          isWhitespace: true,
+        },
+        "\u2001": {
+          isZeroWidthDiacritic: false,
+          isInvisibleFormatMark: false,
+          isWhitespace: true,
+        },
+        "\uFEFF": {
+          isZeroWidthDiacritic: false,
+          isInvisibleFormatMark: false,
+          isWhitespace: true,
+        },
+        " \t": {
+          isZeroWidthDiacritic: false,
+          isInvisibleFormatMark: false,
+          isWhitespace: true,
+        },
+
+        // Diacritic
+        "\u0302": {
+          isZeroWidthDiacritic: true,
+          isInvisibleFormatMark: false,
+          isWhitespace: false,
+        },
+        "\u0344": {
+          isZeroWidthDiacritic: true,
+          isInvisibleFormatMark: false,
+          isWhitespace: false,
+        },
+        "\u0361": {
+          isZeroWidthDiacritic: true,
+          isInvisibleFormatMark: false,
+          isWhitespace: false,
+        },
+        "\u094D": {
+          isZeroWidthDiacritic: true,
+          isInvisibleFormatMark: false,
+          isWhitespace: false,
+        },
+        "\u0651\u064E": {
+          isZeroWidthDiacritic: true,
+          isInvisibleFormatMark: false,
+          isWhitespace: false,
+        },
+
+        // Invisible format mark
+        "\u200B": {
+          isZeroWidthDiacritic: false,
+          isInvisibleFormatMark: true,
+          isWhitespace: false,
+        },
+        "\u200D": {
+          isZeroWidthDiacritic: false,
+          isInvisibleFormatMark: true,
+          isWhitespace: false,
+        },
+        "\u200B\u200D": {
+          isZeroWidthDiacritic: false,
+          isInvisibleFormatMark: true,
+          isWhitespace: false,
+        },
+
+        // Several characters of different categories (issue 21890)
+        "\u092A\u094D\u0930": {
+          isZeroWidthDiacritic: false,
+          isInvisibleFormatMark: false,
+          isWhitespace: false,
+        },
+        "a\u0301": {
+          isZeroWidthDiacritic: false,
+          isInvisibleFormatMark: false,
+          isWhitespace: false,
+        },
+        " a": {
+          isZeroWidthDiacritic: false,
+          isInvisibleFormatMark: false,
+          isWhitespace: false,
+        },
+        "a\u200B": {
+          isZeroWidthDiacritic: false,
+          isInvisibleFormatMark: false,
+          isWhitespace: false,
+        },
+
+        // No whitespace or diacritic or invisible format mark
+        a: {
+          isZeroWidthDiacritic: false,
+          isInvisibleFormatMark: false,
+          isWhitespace: false,
+        },
+        1: {
+          isZeroWidthDiacritic: false,
+          isInvisibleFormatMark: false,
+          isWhitespace: false,
+        },
+      };
+      for (const [character, expectation] of Object.entries(tests)) {
+        expect(getCharUnicodeCategory(character)).toEqual(expectation);
+      }
     });
   });
 
@@ -79,69 +194,12 @@ describe("unicode", function () {
       expect(getUnicodeRangeFor(0x0041)).toEqual(0);
       // fi (Alphabetic Presentation Forms)
       expect(getUnicodeRangeFor(0xfb01)).toEqual(62);
+      // Combining diacritic (Cyrillic Extended-A)
+      expect(getUnicodeRangeFor(0x2dff)).toEqual(9);
     });
 
     it("should not get a Unicode range", function () {
-      expect(getUnicodeRangeFor(0x05ff)).toEqual(-1);
-    });
-  });
-
-  describe("getNormalizedUnicodes", function () {
-    let NormalizedUnicodes;
-
-    beforeAll(function () {
-      NormalizedUnicodes = getNormalizedUnicodes();
-    });
-
-    afterAll(function () {
-      NormalizedUnicodes = null;
-    });
-
-    it("should get normalized Unicode values for ligatures", function () {
-      // fi => f + i
-      expect(NormalizedUnicodes["\uFB01"]).toEqual("fi");
-      // Arabic
-      expect(NormalizedUnicodes["\u0675"]).toEqual("\u0627\u0674");
-    });
-
-    it("should not normalize standard characters", function () {
-      expect(NormalizedUnicodes.A).toEqual(undefined);
-    });
-  });
-
-  describe("reverseIfRtl", function () {
-    let NormalizedUnicodes;
-
-    function getGlyphUnicode(char) {
-      if (NormalizedUnicodes[char] !== undefined) {
-        return NormalizedUnicodes[char];
-      }
-      return char;
-    }
-
-    beforeAll(function () {
-      NormalizedUnicodes = getNormalizedUnicodes();
-    });
-
-    afterAll(function () {
-      NormalizedUnicodes = null;
-    });
-
-    it("should not reverse LTR characters", function () {
-      const A = getGlyphUnicode("A");
-      expect(reverseIfRtl(A)).toEqual("A");
-
-      const fi = getGlyphUnicode("\uFB01");
-      expect(reverseIfRtl(fi)).toEqual("fi");
-    });
-
-    it("should reverse RTL characters", function () {
-      // Hebrew (no-op, since it's not a combined character)
-      const heAlef = getGlyphUnicode("\u05D0");
-      expect(reverseIfRtl(heAlef)).toEqual("\u05D0");
-      // Arabic
-      const arAlef = getGlyphUnicode("\u0675");
-      expect(reverseIfRtl(arAlef)).toEqual("\u0674\u0627");
+      expect(getUnicodeRangeFor(0xaa60)).toEqual(-1);
     });
   });
 });

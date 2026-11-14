@@ -19,10 +19,9 @@ import {
   $namespaceId,
   $nodeName,
   $onChild,
-  XFAObject,
-  XmlObject,
-} from "./xfa_object.js";
+} from "./symbol_utils.js";
 import { $buildXFAObject, NamespaceIds } from "./namespaces.js";
+import { XFAObject, XmlObject } from "./xfa_object.js";
 
 const DATASETS_NS_ID = NamespaceIds.datasets.id;
 
@@ -58,10 +57,9 @@ class Datasets extends XFAObject {
 
 class DatasetsNamespace {
   static [$buildXFAObject](name, attributes) {
-    if (DatasetsNamespace.hasOwnProperty(name)) {
-      return DatasetsNamespace[name](attributes);
-    }
-    return undefined;
+    return Object.hasOwn(DatasetsNamespace, name)
+      ? DatasetsNamespace[name](attributes)
+      : undefined;
   }
 
   static datasets(attributes) {

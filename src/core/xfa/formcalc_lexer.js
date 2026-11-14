@@ -80,7 +80,7 @@ const TOKEN = {
   string: 22,
   this: 23,
   times: 24,
-  identifier: 25, // in main statments too
+  identifier: 25, // in main statements too
 
   /* Main statements */
   break: 26,
@@ -116,11 +116,11 @@ const TOKEN = {
   upto: 54,
 };
 
-const hexPattern = /^[uU]([0-9a-fA-F]{4,8})/;
-const numberPattern = /^[0-9]*(?:\.[0-9]*)?(?:[Ee][+-]?[0-9]+)?/;
-const dotNumberPattern = /^[0-9]*(?:[Ee][+-]?[0-9]+)?/;
+const hexPattern = /^u([0-9a-f]{4,8})/i;
+const numberPattern = /^\d*(?:\.\d*)?(?:E[+-]?\d+)?/i;
+const dotNumberPattern = /^\d*(?:E[+-]?\d+)?/i;
 const eolPattern = /[\r\n]+/;
-const identifierPattern = new RegExp("^[\\p{L}_$!][\\p{L}\\p{N}_$]*", "u");
+const identifierPattern = /^[\p{L}_$!][\p{L}\p{N}_$]*/u;
 
 class Token {
   constructor(id, value = null) {
@@ -180,11 +180,9 @@ class Lexer {
     this.pos += match[0].length;
 
     const lower = identifier.toLowerCase();
-    if (!KEYWORDS.has(lower)) {
-      return new Token(TOKEN.identifier, identifier);
-    }
-
-    return Singletons[lower];
+    return !KEYWORDS.has(lower)
+      ? new Token(TOKEN.identifier, identifier)
+      : Singletons[lower];
   }
 
   getString() {
@@ -239,8 +237,8 @@ class Lexer {
 
   getNumber(first) {
     const match = this.data.substring(this.pos).match(numberPattern);
-    if (!match) {
-      return first - 0x30 /* = 0 */;
+    if (!match[0]) {
+      return new Token(TOKEN.number, first - 0x30 /* = 0 */);
     }
     const number = parseFloat(
       this.data.substring(this.pos - 1, this.pos + match[0].length)

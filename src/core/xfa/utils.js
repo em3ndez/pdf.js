@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 
+import { MathClamp } from "../../shared/math_clamp.js";
 import { shadow } from "../../shared/util.js";
 
 const dimConverters = {
@@ -22,13 +23,10 @@ const dimConverters = {
   in: x => x * 72,
   px: x => x,
 };
-const measurementPattern = /([+-]?[0-9]+\.?[0-9]*)(.*)/;
+const measurementPattern = /([+-]?\d+\.?\d*)(.*)/;
 
 function stripQuotes(str) {
-  if (str.startsWith("'") || str.startsWith('"')) {
-    return str.slice(1, str.length - 1);
-  }
-  return str;
+  return str.startsWith("'") || str.startsWith('"') ? str.slice(1, -1) : str;
 }
 
 function getInteger({ data, defaultValue, validate }) {
@@ -37,10 +35,7 @@ function getInteger({ data, defaultValue, validate }) {
   }
   data = data.trim();
   const n = parseInt(data, 10);
-  if (!isNaN(n) && validate(n)) {
-    return n;
-  }
-  return defaultValue;
+  return !isNaN(n) && validate(n) ? n : defaultValue;
 }
 
 function getFloat({ data, defaultValue, validate }) {
@@ -49,10 +44,7 @@ function getFloat({ data, defaultValue, validate }) {
   }
   data = data.trim();
   const n = parseFloat(data);
-  if (!isNaN(n) && validate(n)) {
-    return n;
-  }
-  return defaultValue;
+  return !isNaN(n) && validate(n) ? n : defaultValue;
 }
 
 function getKeyword({ data, defaultValue, validate }) {
@@ -60,10 +52,7 @@ function getKeyword({ data, defaultValue, validate }) {
     return defaultValue;
   }
   data = data.trim();
-  if (validate(data)) {
-    return data;
-  }
-  return defaultValue;
+  return validate(data) ? data : defaultValue;
 }
 
 function getStringOption(data, options) {
@@ -75,7 +64,7 @@ function getStringOption(data, options) {
 }
 
 function getMeasurement(str, def = "0") {
-  def = def || "0";
+  def ||= "0";
   if (!str) {
     return getMeasurement(def);
   }
@@ -94,11 +83,7 @@ function getMeasurement(str, def = "0") {
   }
 
   const conv = dimConverters[unit];
-  if (conv) {
-    return conv(value);
-  }
-
-  return value;
+  return conv ? conv(value) : value;
 }
 
 function getRatio(data) {
@@ -106,9 +91,8 @@ function getRatio(data) {
     return { num: 1, den: 1 };
   }
   const ratio = data
-    .trim()
-    .split(/\s*:\s*/)
-    .map(x => parseFloat(x))
+    .split(":", 2)
+    .map(x => parseFloat(x.trim()))
     .filter(x => !isNaN(x));
   if (ratio.length === 1) {
     ratio.push(1);
@@ -129,12 +113,10 @@ function getRelevant(data) {
   return data
     .trim()
     .split(/\s+/)
-    .map(e => {
-      return {
-        excluded: e[0] === "-",
-        viewname: e.substring(1),
-      };
-    });
+    .map(e => ({
+      excluded: e[0] === "-",
+      viewname: e.substring(1),
+    }));
 }
 
 function getColor(data, def = [0, 0, 0]) {
@@ -142,11 +124,10 @@ function getColor(data, def = [0, 0, 0]) {
   if (!data) {
     return { r, g, b };
   }
-  const color = data
-    .trim()
-    .split(/\s*,\s*/)
-    .map(c => Math.min(Math.max(0, parseInt(c.trim(), 10)), 255))
-    .map(c => (isNaN(c) ? 0 : c));
+  const color = data.split(",", 3).map(c => {
+    c = parseInt(c.trim(), 10);
+    return isNaN(c) ? 0 : MathClamp(c, 0, 255);
+  });
 
   if (color.length < 3) {
     return { r, g, b };
@@ -161,10 +142,8 @@ function getBBox(data) {
   if (!data) {
     return { x: def, y: def, width: def, height: def };
   }
-  const bbox = data
-    .trim()
-    .split(/\s*,\s*/)
-    .map(m => getMeasurement(m, "-1"));
+  const bbox = data.split(",", 4).map(m => getMeasurement(m.trim(), "-1"));
+
   if (bbox.length < 4 || bbox[2] < 0 || bbox[3] < 0) {
     return { x: def, y: def, width: def, height: def };
   }

@@ -14,26 +14,30 @@
  */
 
 import { Cursor } from "./constants.js";
-import { PDFObject } from "./pdf_object.js";
 
-class FullScreen extends PDFObject {
-  constructor(data) {
-    super(data);
+class FullScreen {
+  #backgroundColor = [];
 
-    this._backgroundColor = [];
-    this._clickAdvances = true;
-    this._cursor = Cursor.hidden;
-    this._defaultTransition = "";
-    this._escapeExits = true;
-    this._isFullScreen = true;
-    this._loop = false;
-    this._timeDelay = 3600;
-    this._usePageTiming = false;
-    this._useTimer = false;
-  }
+  #clickAdvances = true;
+
+  #cursor = Cursor.hidden;
+
+  #defaultTransition = "";
+
+  #escapeExits = true;
+
+  #isFullScreen = true;
+
+  #loop = false;
+
+  #timeDelay = 3600;
+
+  #usePageTiming = false;
+
+  #useTimer = false;
 
   get backgroundColor() {
-    return this._backgroundColor;
+    return this.#backgroundColor;
   }
 
   set backgroundColor(_) {
@@ -41,7 +45,7 @@ class FullScreen extends PDFObject {
   }
 
   get clickAdvances() {
-    return this._clickAdvances;
+    return this.#clickAdvances;
   }
 
   set clickAdvances(_) {
@@ -49,7 +53,7 @@ class FullScreen extends PDFObject {
   }
 
   get cursor() {
-    return this._cursor;
+    return this.#cursor;
   }
 
   set cursor(_) {
@@ -57,7 +61,7 @@ class FullScreen extends PDFObject {
   }
 
   get defaultTransition() {
-    return this._defaultTransition;
+    return this.#defaultTransition;
   }
 
   set defaultTransition(_) {
@@ -65,7 +69,7 @@ class FullScreen extends PDFObject {
   }
 
   get escapeExits() {
-    return this._escapeExits;
+    return this.#escapeExits;
   }
 
   set escapeExits(_) {
@@ -73,7 +77,7 @@ class FullScreen extends PDFObject {
   }
 
   get isFullScreen() {
-    return this._isFullScreen;
+    return this.#isFullScreen;
   }
 
   set isFullScreen(_) {
@@ -81,7 +85,7 @@ class FullScreen extends PDFObject {
   }
 
   get loop() {
-    return this._loop;
+    return this.#loop;
   }
 
   set loop(_) {
@@ -89,7 +93,7 @@ class FullScreen extends PDFObject {
   }
 
   get timeDelay() {
-    return this._timeDelay;
+    return this.#timeDelay;
   }
 
   set timeDelay(_) {
@@ -126,7 +130,7 @@ class FullScreen extends PDFObject {
   }
 
   get usePageTiming() {
-    return this._usePageTiming;
+    return this.#usePageTiming;
   }
 
   set usePageTiming(_) {
@@ -134,7 +138,7 @@ class FullScreen extends PDFObject {
   }
 
   get useTimer() {
-    return this._useTimer;
+    return this.#useTimer;
   }
 
   set useTimer(_) {

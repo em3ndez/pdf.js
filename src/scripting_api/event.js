@@ -13,93 +13,167 @@
  * limitations under the License.
  */
 
-class Event {
-  constructor(data) {
-    this.change = data.change || "";
-    this.changeEx = data.changeEx || null;
-    this.commitKey = data.commitKey || 0;
-    this.fieldFull = data.fieldFull || false;
-    this.keyDown = data.keyDown || false;
-    this.modifier = data.modifier || false;
-    this.name = data.name;
-    this.rc = true;
-    this.richChange = data.richChange || [];
-    this.richChangeEx = data.richChangeEx || [];
-    this.richValue = data.richValue || [];
-    this.selEnd = data.selEnd || -1;
-    this.selStart = data.selStart || -1;
-    this.shift = data.shift || false;
-    this.source = data.source || null;
-    this.target = data.target || null;
-    this.targetName = "";
-    this.type = "Field";
-    this.value = data.value || "";
-    this.willCommit = data.willCommit || false;
+import {
+  USERACTIVATION_CALLBACKID,
+  USERACTIVATION_MAXTIME_VALIDITY,
+} from "./app_utils.js";
+import { DocInternals } from "./doc.js";
+import { FieldInternals } from "./field.js";
+
+const { values } = Object;
+
+// The events are plain objects, tagged as `Event`: an Event class would be
+// reachable, and its source readable, through `event.constructor`.
+const EVENT_PROTOTYPE = Object.create(Object.prototype, {
+  [Symbol.toStringTag]: { value: "Event" },
+});
+
+function createEvent(data) {
+  return {
+    __proto__: EVENT_PROTOTYPE,
+    change: data.change || "",
+    changeEx: data.changeEx || null,
+    commitKey: data.commitKey || 0,
+    fieldFull: data.fieldFull || false,
+    keyDown: data.keyDown || false,
+    modifier: data.modifier || false,
+    name: data.name,
+    rc: true,
+    richChange: data.richChange || [],
+    richChangeEx: data.richChangeEx || [],
+    richValue: data.richValue || [],
+    selEnd: data.selEnd ?? -1,
+    selStart: data.selStart ?? -1,
+    shift: data.shift || false,
+    source: data.source || null,
+    target: data.target || null,
+    targetName: "",
+    type: "Field",
+    value: data.value || "",
+    willCommit: data.willCommit || false,
+  };
+}
+
+function mergeChange(event) {
+  let value = event.value;
+  if (Array.isArray(value)) {
+    return value;
   }
+  if (typeof value !== "string") {
+    value = value.toString();
+  }
+  const prefix = event.selStart >= 0 ? value.substring(0, event.selStart) : "";
+  const postfix =
+    event.selEnd >= 0 && event.selEnd <= value.length
+      ? value.substring(event.selEnd)
+      : "";
+
+  return `${prefix}${event.change}${postfix}`;
 }
 
 class EventDispatcher {
-  constructor(document, calculationOrder, objects) {
-    this._document = document;
-    this._calculationOrder = calculationOrder;
-    this._objects = objects;
+  #calculationOrder;
 
-    this._document.obj._eventDispatcher = this;
+  #doc;
+
+  #externalCall;
+
+  #isCalculating = false;
+
+  #objects;
+
+  #userActivationData;
+
+  constructor(
+    doc,
+    calculationOrder,
+    objects,
+    externalCall,
+    userActivationData
+  ) {
+    this.#doc = doc;
+    this.#calculationOrder = calculationOrder;
+    this.#objects = objects;
+    this.#externalCall = externalCall;
+    this.#userActivationData = userActivationData;
   }
 
-  mergeChange(event) {
-    let value = event.value;
-    if (typeof value !== "string") {
-      value = value.toString();
-    }
-    const prefix =
-      event.selStart >= 0 ? value.substring(0, event.selStart) : "";
-    const postfix =
-      event.selEnd >= 0 && event.selEnd <= value.length
-        ? value.substring(event.selEnd)
-        : "";
-
-    return `${prefix}${event.change}${postfix}`;
+  #userActivation() {
+    this.#userActivationData.userActivation = true;
+    this.#externalCall("setTimeout", [
+      USERACTIVATION_CALLBACKID,
+      USERACTIVATION_MAXTIME_VALIDITY,
+    ]);
   }
 
   dispatch(baseEvent) {
+    if (
+      typeof PDFJSDev !== "undefined" &&
+      PDFJSDev.test("TESTING") &&
+      baseEvent.name === "sandboxtripbegin"
+    ) {
+      this.#externalCall("send", [{ command: "sandboxTripEnd" }]);
+      return;
+    }
+
     const id = baseEvent.id;
-    if (!(id in this._objects)) {
+    if (!(id in this.#objects)) {
       let event;
       if (id === "doc" || id === "page") {
-        event = globalThis.event = new Event(baseEvent);
-        event.source = event.target = this._document.wrapped;
-        event.name = baseEvent.name;
+        event = globalThis.event = createEvent(baseEvent);
+        event.source = event.target = globalThis;
       }
       if (id === "doc") {
-        this._document.obj._dispatchDocEvent(event.name);
+        const eventName = event.name;
+        if (eventName === "Open") {
+          // Treat opening the document as user activation.
+          this.#userActivation();
+          // Initialize document scripts before formatters use them (#15818).
+          DocInternals.initActions(this.#doc);
+          // Run format callbacks before OpenAction, without applying
+          // event.value to the fields.
+          this.#formatAll();
+        }
+        if (
+          !["DidPrint", "DidSave", "WillPrint", "WillSave"].includes(eventName)
+        ) {
+          this.#userActivation();
+        }
+        DocInternals.dispatchDocEvent(this.#doc, event.name);
       } else if (id === "page") {
-        this._document.obj._dispatchPageEvent(
+        this.#userActivation();
+        DocInternals.dispatchPageEvent(
+          this.#doc,
           event.name,
           baseEvent.actions,
           baseEvent.pageNumber
         );
+      } else if (id === "app" && baseEvent.name === "ResetForm") {
+        this.#userActivation();
+        for (const fieldId of baseEvent.ids) {
+          const field = this.#objects[fieldId];
+          if (field) {
+            // The view has already been reset.
+            FieldInternals.setValue(field, field.defaultValue);
+          }
+        }
       }
       return;
     }
 
     const name = baseEvent.name;
-    const source = this._objects[id];
-    const event = (globalThis.event = new Event(baseEvent));
+    const source = this.#objects[id];
+    const event = (globalThis.event = createEvent(baseEvent));
     let savedChange;
 
-    if (source.obj._isButton()) {
-      source.obj._id = id;
-      event.value = source.obj._getExportValue(event.value);
-      if (name === "Action") {
-        source.obj._value = event.value;
-      }
-    }
+    this.#userActivation();
+    FieldInternals.prepareEvent(source, id, event);
 
     switch (name) {
       case "Keystroke":
         savedChange = {
           value: event.value,
+          changeEx: event.changeEx,
           change: event.change,
           selStart: event.selStart,
           selEnd: event.selEnd,
@@ -115,118 +189,179 @@ class EventDispatcher {
         });
         break;
       case "Validate":
-        this.runValidation(source, event);
+        this.#runValidation(source, event);
         return;
       case "Action":
-        this.runActions(source, source, event, name);
-        if (this._document.obj.calculate) {
-          this.runCalculate(source, event);
-        }
+        this.#runActions(source, source, event, name);
+        this.#runCalculate(source, event);
         return;
     }
 
-    this.runActions(source, source, event, name);
+    this.#runActions(source, source, event, name);
 
-    if (name === "Keystroke") {
-      if (event.rc) {
-        if (event.willCommit) {
-          this.runValidation(source, event);
-        } else if (
-          event.change !== savedChange.change ||
+    if (name !== "Keystroke") {
+      return;
+    }
+
+    if (event.rc) {
+      if (event.willCommit) {
+        this.#runValidation(source, event);
+      } else {
+        if (FieldInternals.getIsChoice(source)) {
+          FieldInternals.setValue(source, savedChange.changeEx);
+          FieldInternals.send(source, {
+            value: FieldInternals.getValue(source),
+          });
+          return;
+        }
+
+        const value = mergeChange(event);
+        FieldInternals.setValue(source, value);
+        let selStart, selEnd;
+        if (
           event.selStart !== savedChange.selStart ||
           event.selEnd !== savedChange.selEnd
         ) {
-          source.wrapped.value = this.mergeChange(event);
+          // Selection has been changed by the script so apply the changes.
+          selStart = event.selStart;
+          selEnd = event.selEnd;
+        } else {
+          selEnd = selStart = savedChange.selStart + event.change.length;
         }
-      } else if (!event.willCommit) {
-        source.obj._send({
-          id: source.obj._id,
-          value: savedChange.value,
-          selRange: [savedChange.selStart, savedChange.selEnd],
-        });
+        FieldInternals.send(source, { value, selRange: [selStart, selEnd] });
       }
+    } else if (!event.willCommit) {
+      FieldInternals.send(source, {
+        value: savedChange.value,
+        selRange: [savedChange.selStart, savedChange.selEnd],
+      });
+    } else {
+      // Entry is not valid (rc == false) and it's a commit
+      // so just clear the field.
+      FieldInternals.send(source, {
+        value: "",
+        formattedValue: null,
+        selRange: [0, 0],
+      });
     }
   }
 
-  runValidation(source, event) {
-    const hasRan = this.runActions(source, source, event, "Validate");
+  #formatAll() {
+    // Run format actions if any for all the fields.
+    const event = (globalThis.event = createEvent({}));
+    for (const source of values(this.#objects)) {
+      event.value = FieldInternals.getComputedValue(source);
+      this.#runActions(source, source, event, "Format");
+    }
+  }
+
+  #runValidation(source, event) {
+    const didValidateRun = this.#runActions(source, source, event, "Validate");
     if (event.rc) {
-      if (hasRan) {
-        source.wrapped.value = event.value;
-        source.wrapped.valueAsString = event.value;
-      } else {
-        source.obj.value = event.value;
-        source.obj.valueAsString = event.value;
-      }
+      FieldInternals.setValue(source, event.value);
 
-      if (this._document.obj.calculate) {
-        this.runCalculate(source, event);
-      }
+      this.#runCalculate(source, event);
 
-      event.value = source.obj.value;
-      this.runActions(source, source, event, "Format");
-      source.wrapped.valueAsString = event.value;
+      const savedValue = (event.value =
+        FieldInternals.getComputedValue(source));
+      const formattedValue = this.#runActions(source, source, event, "Format")
+        ? event.value?.toString?.()
+        : null;
+
+      FieldInternals.send(source, { value: savedValue, formattedValue });
+      event.value = savedValue;
+    } else if (didValidateRun) {
+      // The value is not valid.
+      FieldInternals.send(source, {
+        value: "",
+        formattedValue: null,
+        selRange: [0, 0],
+        focus: true, // Stay in the field.
+      });
     }
   }
 
-  runActions(source, target, event, eventName) {
-    event.source = source.wrapped;
-    event.target = target.wrapped;
+  #runActions(source, target, event, eventName) {
+    event.source = source;
+    event.target = target;
     event.name = eventName;
-    event.targetName = target.obj.name;
+    event.targetName = target.name;
     event.rc = true;
 
-    return target.obj._runActions(event);
+    return FieldInternals.runActions(target, event);
   }
 
   calculateNow() {
-    if (!this._calculationOrder) {
+    // Guard against recursive calls to doc.calculateNow().
+    if (
+      !this.#calculationOrder ||
+      this.#isCalculating ||
+      !this.#doc.calculate
+    ) {
       return;
     }
-    const first = this._calculationOrder[0];
-    const source = this._objects[first];
-    globalThis.event = new Event({});
-    this.runCalculate(source, globalThis.event);
+    this.#isCalculating = true;
+    const first = this.#calculationOrder[0];
+    const source = this.#objects[first];
+    globalThis.event = createEvent({});
+
+    this.#runCalculate(source, globalThis.event);
+
+    this.#isCalculating = false;
   }
 
-  runCalculate(source, event) {
-    if (!this._calculationOrder) {
+  #runCalculate(source, event) {
+    // Called by calculateNow and after Action or Validate events.
+    if (!this.#calculationOrder || !this.#doc.calculate) {
       return;
     }
 
-    for (const targetId of this._calculationOrder) {
-      if (!(targetId in this._objects)) {
+    for (const targetId of this.#calculationOrder) {
+      if (!(targetId in this.#objects)) {
         continue;
       }
 
-      if (!this._document.obj.calculate) {
-        // An action may have changed calculate value.
-        continue;
+      if (!this.#doc.calculate) {
+        // An action could have changed calculate value.
+        break;
       }
 
       event.value = null;
-      const target = this._objects[targetId];
-      this.runActions(source, target, event, "Calculate");
-      if (!event.rc) {
-        continue;
-      }
-      if (event.value !== null) {
-        target.wrapped.value = event.value;
-      }
+      const target = this.#objects[targetId];
+      let savedValue = FieldInternals.getComputedValue(target);
+      this.#runActions(source, target, event, "Calculate");
 
-      event.value = target.obj.value;
-      this.runActions(target, target, event, "Validate");
       if (!event.rc) {
         continue;
       }
 
-      event.value = target.obj.value;
-      this.runActions(target, target, event, "Format");
       if (event.value !== null) {
-        target.wrapped.valueAsString = event.value;
+        // A new value has been calculated so set it.
+        FieldInternals.setValue(target, event.value);
+      } else {
+        event.value = FieldInternals.getComputedValue(target);
       }
+
+      this.#runActions(target, target, event, "Validate");
+      if (!event.rc) {
+        if (FieldInternals.getComputedValue(target) !== savedValue) {
+          target.value = savedValue;
+        }
+        continue;
+      }
+
+      if (event.value === null) {
+        event.value = FieldInternals.getComputedValue(target);
+      }
+
+      savedValue = FieldInternals.getComputedValue(target);
+      const formattedValue = this.#runActions(target, target, event, "Format")
+        ? event.value?.toString?.()
+        : null;
+
+      FieldInternals.send(target, { value: savedValue, formattedValue });
     }
   }
 }
 
-export { Event, EventDispatcher };
+export { EventDispatcher, mergeChange };

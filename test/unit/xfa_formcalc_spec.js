@@ -22,8 +22,10 @@ describe("FormCalc expression parser", function () {
   describe("FormCalc lexer", function () {
     it("should lex numbers", function () {
       const lexer = new Lexer(
-        "12 1.2345 .7 .12345 1e-2 1.2E+3 1e2 1.2E3 nan 12. 2.e3 infinity 99999999999999999 123456789.012345678 9e99999"
+        "1 7 12 1.2345 .7 .12345 1e-2 1.2E+3 1e2 1.2E3 nan 12. 2.e3 infinity 99999999999999999 123456789.012345678 9e99999"
       );
+      expect(lexer.next()).toEqual(new Token(TOKEN.number, 1));
+      expect(lexer.next()).toEqual(new Token(TOKEN.number, 7));
       expect(lexer.next()).toEqual(new Token(TOKEN.number, 12));
       expect(lexer.next()).toEqual(new Token(TOKEN.number, 1.2345));
       expect(lexer.next()).toEqual(new Token(TOKEN.number, 0.7));
@@ -245,7 +247,7 @@ describe("FormCalc expression parser", function () {
         operand: { id: "こんにちは世界" },
         index: -0,
       });
-      expect(Object.is(-0, dump.index)).toBe(true);
+      expect(Object.is(-0, dump.index)).toBeTrue();
 
       parser = new Parser(`こんにちは世界[+0]`);
       dump = parser.parse().dump()[0];
@@ -253,7 +255,7 @@ describe("FormCalc expression parser", function () {
         operand: { id: "こんにちは世界" },
         index: +0,
       });
-      expect(Object.is(+0, dump.index)).toBe(true);
+      expect(Object.is(+0, dump.index)).toBeTrue();
 
       parser = new Parser(`こんにちは世界[*]`);
       expect(parser.parse().dump()[0]).toEqual({
@@ -264,7 +266,9 @@ describe("FormCalc expression parser", function () {
 
     it("should parse basic expression with dots", function () {
       const parser = new Parser("a.b.c.#d..e.f..g.*");
-      expect(parser.parse().dump()[0]).toEqual({
+      const exprlist = parser.parse();
+      expect(exprlist.expressions[0].isDotExpression()).toBeTrue();
+      expect(exprlist.dump()[0]).toEqual({
         operator: ".",
         left: { id: "a" },
         right: {
@@ -297,13 +301,13 @@ describe("FormCalc expression parser", function () {
 
     it("should parse var declaration with error", function () {
       let parser = new Parser("var 123 = a");
-      expect(() => parser.parse()).toThrow(new Error(Errors.var));
+      expect(() => parser.parse()).toThrowError(Errors.var);
 
       parser = new Parser(`var "123" = a`);
-      expect(() => parser.parse()).toThrow(new Error(Errors.var));
+      expect(() => parser.parse()).toThrowError(Errors.var);
 
       parser = new Parser(`var for var a`);
-      expect(() => parser.parse()).toThrow(new Error(Errors.var));
+      expect(() => parser.parse()).toThrowError(Errors.var);
     });
 
     it("should parse for declaration with a step", function () {
@@ -378,27 +382,27 @@ endfor`);
 
     it("should parse for declaration with error", function () {
       let parser = new Parser("for 123 = i upto 1 do a = 1 endfor");
-      expect(() => parser.parse()).toThrow(new Error(Errors.assignment));
+      expect(() => parser.parse()).toThrowError(Errors.assignment);
 
       parser = new Parser("for var 123 = i upto 1 do a = 1 endfor");
-      expect(() => parser.parse()).toThrow(new Error(Errors.assignment));
+      expect(() => parser.parse()).toThrowError(Errors.assignment);
 
       parser = new Parser("for var i = 123 upt 1 do a = 1 endfor");
-      expect(() => parser.parse()).toThrow(new Error(Errors.for));
+      expect(() => parser.parse()).toThrowError(Errors.for);
 
       parser = new Parser("for var i = 123 var 1 do a = 1 endfor");
-      expect(() => parser.parse()).toThrow(new Error(Errors.for));
+      expect(() => parser.parse()).toThrowError(Errors.for);
 
       parser = new Parser(
         "for var i = 123 upto 1 step for var j = 1 do endfor do a = 1 endfor"
       );
-      expect(() => parser.parse()).toThrow(new Error(Errors.for));
+      expect(() => parser.parse()).toThrowError(Errors.for);
 
       parser = new Parser("for var i = 123 downto 1 do a = 1 endfunc");
-      expect(() => parser.parse()).toThrow(new Error(Errors.for));
+      expect(() => parser.parse()).toThrowError(Errors.for);
 
       parser = new Parser("for var i = 123 downto 1 do a = 1");
-      expect(() => parser.parse()).toThrow(new Error(Errors.for));
+      expect(() => parser.parse()).toThrowError(Errors.for);
     });
 
     it("should parse foreach declaration", function () {
@@ -429,25 +433,25 @@ endfor`);
 
     it("should parse foreach declaration with error", function () {
       let parser = new Parser("foreach 123 in (1, 2, 3) do a = 1 endfor");
-      expect(() => parser.parse()).toThrow(new Error(Errors.foreach));
+      expect(() => parser.parse()).toThrowError(Errors.foreach);
 
       parser = new Parser("foreach foo in 1, 2, 3) do a = 1 endfor");
-      expect(() => parser.parse()).toThrow(new Error(Errors.foreach));
+      expect(() => parser.parse()).toThrowError(Errors.foreach);
 
       parser = new Parser("foreach foo in (1, 2, 3 do a = 1 endfor");
-      expect(() => parser.parse()).toThrow(new Error(Errors.params));
+      expect(() => parser.parse()).toThrowError(Errors.params);
 
       parser = new Parser("foreach foo in (1, 2 3) do a = 1 endfor");
-      expect(() => parser.parse()).toThrow(new Error(Errors.params));
+      expect(() => parser.parse()).toThrowError(Errors.params);
 
       parser = new Parser("foreach foo in (1, 2, 3) od a = 1 endfor");
-      expect(() => parser.parse()).toThrow(new Error(Errors.foreach));
+      expect(() => parser.parse()).toThrowError(Errors.foreach);
 
       parser = new Parser("foreach foo in (1, 2, 3) do a = 1 endforeach");
-      expect(() => parser.parse()).toThrow(new Error(Errors.foreach));
+      expect(() => parser.parse()).toThrowError(Errors.foreach);
 
       parser = new Parser("foreach foo in (1, 2, 3) do a = 1  123");
-      expect(() => parser.parse()).toThrow(new Error(Errors.foreach));
+      expect(() => parser.parse()).toThrowError(Errors.foreach);
     });
 
     it("should parse while declaration", function () {
@@ -479,16 +483,16 @@ endwhile
 
     it("should parse while declaration with error", function () {
       let parser = new Parser("while a == 1 do a = 2 endwhile");
-      expect(() => parser.parse()).toThrow(new Error(Errors.while));
+      expect(() => parser.parse()).toThrowError(Errors.while);
 
       parser = new Parser("while (a == 1 do a = 2 endwhile");
-      expect(() => parser.parse()).toThrow(new Error(Errors.while));
+      expect(() => parser.parse()).toThrowError(Errors.while);
 
       parser = new Parser("while (a == 1) var a = 2 endwhile");
-      expect(() => parser.parse()).toThrow(new Error(Errors.while));
+      expect(() => parser.parse()).toThrowError(Errors.while);
 
       parser = new Parser("while (a == 1) do var a = 2 end");
-      expect(() => parser.parse()).toThrow(new Error(Errors.while));
+      expect(() => parser.parse()).toThrowError(Errors.while);
     });
 
     it("should parse do declaration", function () {
@@ -523,7 +527,7 @@ do
   y = 2
 endfunc
       `);
-      expect(() => parser.parse()).toThrow(new Error(Errors.block));
+      expect(() => parser.parse()).toThrowError(Errors.block);
     });
 
     it("should parse func declaration", function () {
@@ -549,19 +553,19 @@ endfunc
 
     it("should parse func declaration with error", function () {
       let parser = new Parser("func 123(a, b) do a = 1 endfunc");
-      expect(() => parser.parse()).toThrow(new Error(Errors.func));
+      expect(() => parser.parse()).toThrowError(Errors.func);
 
       parser = new Parser("func foo(a, b) for a = 1 endfunc");
-      expect(() => parser.parse()).toThrow(new Error(Errors.func));
+      expect(() => parser.parse()).toThrowError(Errors.func);
 
       parser = new Parser("func foo(a, b) do a = 1 endfun");
-      expect(() => parser.parse()).toThrow(new Error(Errors.func));
+      expect(() => parser.parse()).toThrowError(Errors.func);
 
       parser = new Parser("func foo(a, b, c do a = 1 endfunc");
-      expect(() => parser.parse()).toThrow(new Error(Errors.func));
+      expect(() => parser.parse()).toThrowError(Errors.func);
 
       parser = new Parser("func foo(a, b, 123) do a = 1 endfunc");
-      expect(() => parser.parse()).toThrow(new Error(Errors.func));
+      expect(() => parser.parse()).toThrowError(Errors.func);
     });
 
     it("should parse if declaration", function () {
@@ -710,20 +714,27 @@ endfunc
 
     it("should parse if declaration with error", function () {
       let parser = new Parser("if foo == 1 then a = 1 endif");
-      expect(() => parser.parse()).toThrow(new Error(Errors.if));
+      expect(() => parser.parse()).toThrowError(Errors.if);
 
       parser = new Parser("if (foo == 1 then a = 1 endif");
-      expect(() => parser.parse()).toThrow(new Error(Errors.if));
+      expect(() => parser.parse()).toThrowError(Errors.if);
 
       parser = new Parser(
         "if (foo == 1) then a = 1 elseiff (foo == 2) then a = 2 endif"
       );
-      expect(() => parser.parse()).toThrow(new Error(Errors.if));
+      expect(() => parser.parse()).toThrowError(Errors.if);
 
       parser = new Parser(
         "if (foo == 1) then a = 1 elseif (foo == 2) then a = 2 end"
       );
-      expect(() => parser.parse()).toThrow(new Error(Errors.if));
+      expect(() => parser.parse()).toThrowError(Errors.if);
+    });
+
+    it("should parse som predicate", () => {
+      const parser = new Parser("a.b <= 3");
+      const expr = parser.parse().expressions[0];
+      expect(expr.isSomPredicate()).toBeTrue();
+      expect(expr.left.isSomPredicate()).toBeTrue();
     });
   });
 });

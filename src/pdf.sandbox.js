@@ -13,19 +13,15 @@
  * limitations under the License.
  */
 
-import ModuleLoader from "../external/quickjs/quickjs-eval.js";
 import { SandboxSupportBase } from "./pdf.sandbox.external.js";
-
-/* eslint-disable-next-line no-unused-vars */
-const pdfjsVersion = PDFJSDev.eval("BUNDLE_VERSION");
-/* eslint-disable-next-line no-unused-vars */
-const pdfjsBuild = PDFJSDev.eval("BUNDLE_BUILD");
 
 class SandboxSupport extends SandboxSupportBase {
   exportValueToSandbox(val) {
     // The communication with the Quickjs sandbox is based on strings
     // So we use JSON.stringfy to serialize
-    return JSON.stringify(val);
+    return JSON.stringify(val, (k, v) =>
+      v instanceof Map ? Object.fromEntries(v) : v
+    );
   }
 
   importValueFromSandbox(val) {
@@ -55,12 +51,12 @@ class Sandbox {
   }
 
   create(data) {
-    if (PDFJSDev.test("!PRODUCTION || TESTING")) {
+    if (PDFJSDev.test("TESTING")) {
       this._module.ccall("nukeSandbox", null, []);
     }
     const code = [PDFJSDev.eval("PDF_SCRIPTING_JS_SOURCE")];
 
-    if (PDFJSDev.test("!PRODUCTION || TESTING")) {
+    if (PDFJSDev.test("TESTING")) {
       code.push(
         `globalThis.sendResultForTesting = callExternalFunction.bind(null, "send");`
       );
@@ -71,7 +67,7 @@ class Sandbox {
     let success = false;
     let buf = 0;
     try {
-      const sandboxData = JSON.stringify(data);
+      const sandboxData = this.support.exportValueToSandbox(data);
       // "pdfjsScripting.initSandbox..." MUST be the last line to be evaluated
       // since the returned value is used for the communication.
       code.push(`pdfjsScripting.initSandbox({ data: ${sandboxData} })`);
@@ -84,6 +80,7 @@ class Sandbox {
         [buf, this._alertOnError]
       );
     } catch (error) {
+      // eslint-disable-next-line no-console
       console.error(error);
     } finally {
       if (buf) {
@@ -103,13 +100,11 @@ class Sandbox {
   }
 
   dispatchEvent(event) {
-    this.support.callSandboxFunction("dispatchEvent", event);
+    this.support?.callSandboxFunction("dispatchEvent", event);
   }
 
   dumpMemoryUse() {
-    if (this._module) {
-      this._module.ccall("dumpMemoryUse", null, []);
-    }
+    this._module?.ccall("dumpMemoryUse", null, []);
   }
 
   nukeSandbox() {
@@ -122,7 +117,7 @@ class Sandbox {
   }
 
   evalForTesting(code, key) {
-    if (PDFJSDev.test("!PRODUCTION || TESTING")) {
+    if (PDFJSDev.test("TESTING")) {
       this._module.ccall(
         "evalInSandbox",
         null,
@@ -142,10 +137,16 @@ class Sandbox {
   }
 }
 
-function QuickJSSandbox() {
-  return ModuleLoader().then(module => {
-    return new Sandbox(window, module);
-  });
+async function QuickJSSandbox(wasmUrl = "../web/wasm/") {
+  const { default: ModuleLoader } = await __raw_import__(
+    `${wasmUrl}quickjs-eval.js`
+  );
+  const module = await ModuleLoader();
+  return new Sandbox(window, module);
 }
+
+globalThis.pdfjsSandbox = {
+  QuickJSSandbox,
+};
 
 export { QuickJSSandbox };

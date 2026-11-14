@@ -13,12 +13,18 @@
  * limitations under the License.
  */
 
-import "../extensions/firefox/tools/l10n.js";
-import { DefaultExternalServices, PDFViewerApplication } from "./app.js";
-import { isPdfFile, PDFDataRangeTransport, shadow } from "pdfjs-lib";
+import {
+  createPromiseCapability,
+  MathClamp,
+  PDFDataRangeTransport,
+} from "pdfjs-lib";
+import { AppOptions } from "./app_options.js";
+import { BaseDownloadManager } from "./base_download_manager.js";
+import { BaseExternalServices } from "./external_services.js";
 import { BasePreferences } from "./preferences.js";
 import { DEFAULT_SCALE_VALUE } from "./ui_utils.js";
-import { getL10nFallback } from "./l10n_utils.js";
+import { internalOpt } from "./internal_evt.js";
+import { L10n } from "./l10n.js";
 
 if (typeof PDFJSDev === "undefined" || !PDFJSDev.test("MOZCENTRAL")) {
   throw new Error(
@@ -26,43 +32,42 @@ if (typeof PDFJSDev === "undefined" || !PDFJSDev.test("MOZCENTRAL")) {
   );
 }
 
+let viewerApp = { initialized: false };
+function initCom(app) {
+  viewerApp = app;
+}
+
+// nsPagePrintTimer waits ~4.5s over the first ten sheets, then 50ms per sheet.
+const PRINT_TO_PDF_BASE_DELAY = 4_500;
+const PRINT_TO_PDF_PER_ENTRY_DELAY = 50;
+const PRINT_TO_PDF_MIN_TIMEOUT = 10_000;
+
+function getPrintToPDFTimeout(entries) {
+  return Math.max(
+    PRINT_TO_PDF_MIN_TIMEOUT,
+    2 * (PRINT_TO_PDF_BASE_DELAY + PRINT_TO_PDF_PER_ENTRY_DELAY * entries)
+  );
+}
+
 class FirefoxCom {
-  /**
-   * Creates an event that the extension is listening for and will
-   * synchronously respond to.
-   * NOTE: It is recommended to use requestAsync() instead since one day we may
-   *       not be able to synchronously reply.
-   * @param {string} action - The action to trigger.
-   * @param {Object|string} [data] - The data to send.
-   * @returns {*} The response.
-   */
-  static requestSync(action, data) {
-    const request = document.createTextNode("");
-    document.documentElement.appendChild(request);
-
-    const sender = document.createEvent("CustomEvent");
-    sender.initCustomEvent("pdf.js.message", true, false, {
-      action,
-      data,
-      sync: true,
-    });
-    request.dispatchEvent(sender);
-    const response = sender.detail.response;
-    request.remove();
-
-    return response;
-  }
-
   /**
    * Creates an event that the extension is listening for and will
    * asynchronously respond to.
    * @param {string} action - The action to trigger.
-   * @param {Object|string} [data] - The data to send.
+   * @param {object | string} [data] - The data to send.
+   * @param {number} [timeout] - Reject after this many milliseconds without a
+   *   response; `0` waits forever.
    * @returns {Promise<any>} A promise that is resolved with the response data.
    */
-  static requestAsync(action, data) {
-    return new Promise(resolve => {
-      this.request(action, data, resolve);
+  static requestAsync(action, data, timeout = 0) {
+    return new Promise((resolve, reject) => {
+      const timeoutId = timeout
+        ? setTimeout(reject, timeout, new Error(`"${action}" timed out.`))
+        : 0;
+      this.request(action, data, response => {
+        clearTimeout(timeoutId);
+        resolve(response);
+      });
     });
   }
 
@@ -70,7 +75,7 @@ class FirefoxCom {
    * Creates an event that the extension is listening for and will, optionally,
    * asynchronously respond to.
    * @param {string} action - The action to trigger.
-   * @param {Object|string} [data] - The data to send.
+   * @param {object | string} [data] - The data to send.
    */
   static request(action, data, callback = null) {
     const request = document.createTextNode("");
@@ -86,127 +91,57 @@ class FirefoxCom {
         { once: true }
       );
     }
-    document.documentElement.appendChild(request);
+    document.documentElement.append(request);
 
-    const sender = document.createEvent("CustomEvent");
-    sender.initCustomEvent("pdf.js.message", true, false, {
-      action,
-      data,
-      sync: false,
-      responseExpected: !!callback,
+    const sender = new CustomEvent("pdf.js.message", {
+      bubbles: true,
+      cancelable: false,
+      detail: {
+        action,
+        data,
+        responseExpected: !!callback,
+      },
     });
     request.dispatchEvent(sender);
   }
 }
 
-class DownloadManager {
-  constructor() {
-    this._openBlobUrls = new WeakMap();
-  }
-
-  downloadUrl(url, filename) {
+class DownloadManager extends BaseDownloadManager {
+  _triggerDownload(
+    blobUrl,
+    originalUrl,
+    filename,
+    isAttachment = false,
+    isModified = false
+  ) {
     FirefoxCom.request("download", {
-      originalUrl: url,
-      filename,
-    });
-  }
-
-  downloadData(data, filename, contentType) {
-    const blobUrl = URL.createObjectURL(
-      new Blob([data], { type: contentType })
-    );
-
-    FirefoxCom.requestAsync("download", {
       blobUrl,
-      originalUrl: blobUrl,
+      originalUrl,
       filename,
-      isAttachment: true,
-    }).then(error => {
-      URL.revokeObjectURL(blobUrl);
+      isAttachment,
+      isModified,
     });
   }
 
-  /**
-   * @returns {boolean} Indicating if the data was opened.
-   */
-  openOrDownloadData(element, data, filename) {
-    const isPdfData = isPdfFile(filename);
-    const contentType = isPdfData ? "application/pdf" : "";
-
-    if (isPdfData) {
-      let blobUrl = this._openBlobUrls.get(element);
-      if (!blobUrl) {
-        blobUrl = URL.createObjectURL(new Blob([data], { type: contentType }));
-        this._openBlobUrls.set(element, blobUrl);
-      }
-      // Let Firefox's content handler catch the URL and display the PDF.
-      const viewerUrl = blobUrl + "#filename=" + encodeURIComponent(filename);
-
-      try {
-        window.open(viewerUrl);
-        return true;
-      } catch (ex) {
-        console.error(`openOrDownloadData: ${ex}`);
-        // Release the `blobUrl`, since opening it failed, and fallback to
-        // downloading the PDF file.
-        URL.revokeObjectURL(blobUrl);
-        this._openBlobUrls.delete(element);
-      }
+  _getOpenDataUrl(blobUrl, filename, dest = null) {
+    // Let Firefox's content handler catch the URL and display the PDF.
+    // NOTE: This cannot use a query string for the filename, see
+    //       https://bugzilla.mozilla.org/show_bug.cgi?id=1632644#c5
+    let url = blobUrl + "#filename=" + encodeURIComponent(filename);
+    if (dest) {
+      url += `&filedest=${escape(dest)}`;
     }
-
-    this.downloadData(data, filename, contentType);
-    return false;
-  }
-
-  download(blob, url, filename, sourceEventType = "download") {
-    const blobUrl = URL.createObjectURL(blob);
-
-    FirefoxCom.requestAsync("download", {
-      blobUrl,
-      originalUrl: url,
-      filename,
-      sourceEventType,
-    }).then(error => {
-      if (error) {
-        // If downloading failed in `PdfStreamConverter.jsm` it's very unlikely
-        // that attempting to fallback and re-download would be helpful here.
-        console.error("`ChromeActions.download` failed.");
-      }
-      URL.revokeObjectURL(blobUrl);
-    });
+    return url;
   }
 }
 
-class FirefoxPreferences extends BasePreferences {
+class Preferences extends BasePreferences {
+  async _readFromStorage(prefObj) {
+    return FirefoxCom.requestAsync("getPreferences", prefObj);
+  }
+
   async _writeToStorage(prefObj) {
     return FirefoxCom.requestAsync("setPreferences", prefObj);
-  }
-
-  async _readFromStorage(prefObj) {
-    const prefStr = await FirefoxCom.requestAsync("getPreferences", prefObj);
-    return JSON.parse(prefStr);
-  }
-}
-
-class MozL10n {
-  constructor(mozL10n) {
-    this.mozL10n = mozL10n;
-  }
-
-  async getLanguage() {
-    return this.mozL10n.getLanguage();
-  }
-
-  async getDirection() {
-    return this.mozL10n.getDirection();
-  }
-
-  async get(key, args = null, fallback = getL10nFallback(key, args)) {
-    return this.mozL10n.get(key, args, fallback);
-  }
-
-  async translate(element) {
-    this.mozL10n.translate(element);
   }
 }
 
@@ -218,24 +153,27 @@ class MozL10n {
     "findcasesensitivitychange",
     "findentirewordchange",
     "findbarclose",
+    "finddiacriticmatchingchange",
   ];
+  const findLen = "find".length;
+
   const handleEvent = function ({ type, detail }) {
-    if (!PDFViewerApplication.initialized) {
+    if (!viewerApp.initialized) {
       return;
     }
     if (type === "findbarclose") {
-      PDFViewerApplication.eventBus.dispatch(type, { source: window });
+      viewerApp.eventBus.dispatch(type, { source: window });
       return;
     }
-    PDFViewerApplication.eventBus.dispatch("find", {
+    viewerApp.eventBus.dispatch("find", {
       source: window,
-      type: type.substring("find".length),
+      type: type.substring(findLen),
       query: detail.query,
-      phraseSearch: true,
       caseSensitive: !!detail.caseSensitive,
       entireWord: !!detail.entireWord,
       highlightAll: !!detail.highlightAll,
       findPrevious: !!detail.findPrevious,
+      matchDiacritics: !!detail.matchDiacritics,
     });
   };
 
@@ -247,18 +185,18 @@ class MozL10n {
 (function listenZoomEvents() {
   const events = ["zoomin", "zoomout", "zoomreset"];
   const handleEvent = function ({ type, detail }) {
-    if (!PDFViewerApplication.initialized) {
+    if (!viewerApp.initialized) {
       return;
     }
     // Avoid attempting to needlessly reset the zoom level *twice* in a row,
     // when using the `Ctrl + 0` keyboard shortcut.
     if (
       type === "zoomreset" &&
-      PDFViewerApplication.pdfViewer.currentScaleValue === DEFAULT_SCALE_VALUE
+      viewerApp.pdfViewer.currentScaleValue === DEFAULT_SCALE_VALUE
     ) {
       return;
     }
-    PDFViewerApplication.eventBus.dispatch(type, { source: window });
+    viewerApp.eventBus.dispatch(type, { source: window });
   };
 
   for (const event of events) {
@@ -268,23 +206,89 @@ class MozL10n {
 
 (function listenSaveEvent() {
   const handleEvent = function ({ type, detail }) {
-    if (!PDFViewerApplication.initialized) {
+    if (!viewerApp.initialized) {
       return;
     }
-    PDFViewerApplication.eventBus.dispatch(type, { source: window });
+    viewerApp.eventBus.dispatch("download", { source: window });
   };
 
   window.addEventListener("save", handleEvent);
 })();
+
+(function listenEditingEvent() {
+  const handleEvent = function ({ detail }) {
+    if (!viewerApp.initialized) {
+      return;
+    }
+    viewerApp.eventBus.dispatch("editingaction", {
+      source: window,
+      name: detail.name,
+    });
+  };
+
+  window.addEventListener("editingaction", handleEvent);
+})();
+
+if (PDFJSDev.test("GECKOVIEW")) {
+  (function listenQueryEvents() {
+    window.addEventListener("pdf.js.query", async ({ detail: { queryId } }) => {
+      let result = null;
+      if (viewerApp.initialized && queryId === "canDownloadInsteadOfPrint") {
+        result = false;
+        const { pdfDocument, pdfViewer } = viewerApp;
+        if (pdfDocument) {
+          try {
+            const hasUnchangedAnnotations =
+              pdfDocument.annotationStorage.size === 0;
+            // WillPrint is called just before printing the document and could
+            // lead to have modified annotations.
+            const hasWillPrint =
+              pdfViewer.enableScripting &&
+              !!(await pdfDocument.getJSActions())?.WillPrint;
+
+            result = hasUnchangedAnnotations && !hasWillPrint;
+          } catch {
+            console.warn("Unable to check if the document can be downloaded.");
+          }
+        }
+      }
+
+      window.dispatchEvent(
+        new CustomEvent("pdf.js.query.answer", {
+          bubbles: true,
+          cancelable: false,
+          detail: {
+            queryId,
+            value: result,
+          },
+        })
+      );
+    });
+  })();
+
+  (function listenAddSignatureEvent() {
+    const handleEvent = function ({ detail }) {
+      if (!viewerApp.initialized) {
+        return;
+      }
+      viewerApp.eventBus.dispatch("addsignature", {
+        source: window,
+        text: detail?.text,
+      });
+    };
+
+    window.addEventListener("addsignature", handleEvent);
+  })();
+}
 
 class FirefoxComDataRangeTransport extends PDFDataRangeTransport {
   requestDataRange(begin, end) {
     FirefoxCom.request("requestDataRange", { begin, end });
   }
 
+  // NOTE: This method is currently not invoked in the Firefox PDF Viewer.
   abort() {
-    // Sync call to ensure abort is really started.
-    FirefoxCom.requestSync("abortLoading", null);
+    FirefoxCom.request("abortLoading", null);
   }
 }
 
@@ -305,16 +309,431 @@ class FirefoxScripting {
   }
 }
 
-class FirefoxExternalServices extends DefaultExternalServices {
-  static updateFindControlState(data) {
+class MLManager {
+  #abortSignal = null;
+
+  #enabled = null;
+
+  #eventBus = null;
+
+  #ready = null;
+
+  #requestResolvers = null;
+
+  hasProgress = false;
+
+  static #AI_ALT_TEXT_MODEL_NAME = "moz-image-to-text";
+
+  constructor({
+    altTextLearnMoreUrl,
+    enableGuessAltText,
+    enableAltTextModelDownload,
+  }) {
+    // The `altTextLearnMoreUrl` is used to provide a link to the user to learn
+    // more about the "alt text" feature.
+    // The link is used in the Alt Text dialog or in the Image Settings.
+    this.altTextLearnMoreUrl = altTextLearnMoreUrl;
+    this.enableAltTextModelDownload = enableAltTextModelDownload;
+    this.enableGuessAltText = enableGuessAltText;
+  }
+
+  setEventBus(eventBus, abortSignal) {
+    this.#eventBus = eventBus;
+    this.#abortSignal = abortSignal;
+
+    const evtOpts = { signal: abortSignal, ...internalOpt };
+    eventBus.on(
+      "enablealttextmodeldownload",
+      ({ value }) => {
+        if (this.enableAltTextModelDownload === value) {
+          return;
+        }
+        if (value) {
+          this.downloadModel("altText");
+        } else {
+          this.deleteModel("altText");
+        }
+      },
+      evtOpts
+    );
+    eventBus.on(
+      "enableguessalttext",
+      ({ value }) => {
+        this.toggleService("altText", value);
+      },
+      evtOpts
+    );
+  }
+
+  async isEnabledFor(name) {
+    return this.enableGuessAltText && !!(await this.#enabled?.get(name));
+  }
+
+  isReady(name) {
+    return this.#ready?.has(name) ?? false;
+  }
+
+  async deleteModel(name) {
+    if (name !== "altText" || !this.enableAltTextModelDownload) {
+      return;
+    }
+    this.enableAltTextModelDownload = false;
+    this.#ready?.delete(name);
+    this.#enabled?.delete(name);
+    await this.toggleService("altText", false);
+    await FirefoxCom.requestAsync(
+      "mlDelete",
+      MLManager.#AI_ALT_TEXT_MODEL_NAME
+    );
+  }
+
+  async loadModel(name) {
+    if (name === "altText" && this.enableAltTextModelDownload) {
+      await this.#loadAltTextEngine(false);
+    }
+  }
+
+  async downloadModel(name) {
+    if (name !== "altText" || this.enableAltTextModelDownload) {
+      return null;
+    }
+    this.enableAltTextModelDownload = true;
+    return this.#loadAltTextEngine(true);
+  }
+
+  async guess(data) {
+    if (data?.name !== "altText") {
+      return null;
+    }
+    const resolvers = (this.#requestResolvers ||= new Set());
+    const resolver = createPromiseCapability();
+    resolvers.add(resolver);
+
+    data.service = MLManager.#AI_ALT_TEXT_MODEL_NAME;
+
+    FirefoxCom.requestAsync("mlGuess", data)
+      .then(response => {
+        if (resolvers.has(resolver)) {
+          resolver.resolve(response);
+          resolvers.delete(resolver);
+        }
+      })
+      .catch(reason => {
+        if (resolvers.has(resolver)) {
+          resolver.reject(reason);
+          resolvers.delete(resolver);
+        }
+      });
+
+    return resolver.promise;
+  }
+
+  async #cancelAllRequests() {
+    if (!this.#requestResolvers) {
+      return;
+    }
+    for (const resolver of this.#requestResolvers) {
+      resolver.resolve({ cancel: true });
+    }
+    this.#requestResolvers.clear();
+    this.#requestResolvers = null;
+  }
+
+  async toggleService(name, enabled) {
+    if (name !== "altText" || this.enableGuessAltText === enabled) {
+      return;
+    }
+
+    this.enableGuessAltText = enabled;
+    if (enabled) {
+      if (this.enableAltTextModelDownload) {
+        await this.#loadAltTextEngine(false);
+      }
+    } else {
+      this.#cancelAllRequests();
+    }
+  }
+
+  async #loadAltTextEngine(listenToProgress) {
+    if (this.#enabled?.has("altText")) {
+      // We already have a promise for the "altText" service.
+      return;
+    }
+    this.#ready ||= new Set();
+    const promise = FirefoxCom.requestAsync("loadAIEngine", {
+      service: MLManager.#AI_ALT_TEXT_MODEL_NAME,
+      listenToProgress,
+    }).then(ok => {
+      if (ok) {
+        this.#ready.add("altText");
+      }
+      return ok;
+    });
+    (this.#enabled ||= new Map()).set("altText", promise);
+    if (listenToProgress) {
+      const ac = new AbortController();
+      const signal = AbortSignal.any([this.#abortSignal, ac.signal]);
+
+      this.hasProgress = true;
+      window.addEventListener(
+        "loadAIEngineProgress",
+        ({ detail }) => {
+          this.#eventBus.dispatch("loadaiengineprogress", {
+            source: this,
+            detail,
+          });
+          if (detail.finished) {
+            ac.abort();
+            this.hasProgress = false;
+          }
+        },
+        { signal }
+      );
+      promise.then(ok => {
+        if (!ok) {
+          ac.abort();
+          this.hasProgress = false;
+        }
+      });
+    }
+    await promise;
+  }
+}
+
+class SignatureStorage {
+  #eventBus = null;
+
+  #signatures = null;
+
+  #signal = null;
+
+  constructor(eventBus, signal) {
+    this.#eventBus = eventBus;
+    this.#signal = signal;
+  }
+
+  #handleSignature(data) {
+    return FirefoxCom.requestAsync("handleSignature", data);
+  }
+
+  async getAll() {
+    if (this.#signal) {
+      window.addEventListener(
+        "storedSignaturesChanged",
+        () => {
+          this.#signatures = null;
+          this.#eventBus?.dispatch("storedsignatureschanged", { source: this });
+        },
+        { signal: this.#signal }
+      );
+      this.#signal = null;
+    }
+    if (!this.#signatures) {
+      this.#signatures = new Map();
+      const data = await this.#handleSignature({ action: "get" });
+      if (data) {
+        for (const { uuid, description, signatureData } of data) {
+          this.#signatures.set(uuid, { description, signatureData });
+        }
+      }
+    }
+    return this.#signatures;
+  }
+
+  async isFull() {
+    // We want to store at most 5 signatures.
+    return (await this.size()) === 5;
+  }
+
+  async size() {
+    return (await this.getAll()).size;
+  }
+
+  async create(data) {
+    if (await this.isFull()) {
+      return null;
+    }
+    const uuid = await this.#handleSignature({
+      action: "create",
+      ...data,
+    });
+    if (!uuid) {
+      return null;
+    }
+    this.#signatures.set(uuid, data);
+    return uuid;
+  }
+
+  async delete(uuid) {
+    const signatures = await this.getAll();
+    if (!signatures.has(uuid)) {
+      return false;
+    }
+    if (await this.#handleSignature({ action: "delete", uuid })) {
+      signatures.delete(uuid);
+      return true;
+    }
+    return false;
+  }
+}
+
+// `nsresult` codes from PSM/NSS that we recognize. Names mirror
+// Firefox's nsINSSErrorsService and security/nss codes; values aren't
+// stable, so we compare strings instead of integers.
+const NSS_ERR_CODES = {
+  EXPIRED: new Set([
+    "SEC_ERROR_EXPIRED_CERTIFICATE",
+    "SEC_ERROR_EXPIRED_ISSUER_CERTIFICATE",
+    "MOZILLA_PKIX_ERROR_NOT_YET_VALID_CERTIFICATE",
+    "MOZILLA_PKIX_ERROR_NOT_YET_VALID_ISSUER_CERTIFICATE",
+  ]),
+  // Only definite-revoked codes belong here. We intentionally do NOT
+  // include OCSP-response-missing-style codes (e.g.
+  // MOZILLA_PKIX_ERROR_OCSP_RESPONSE_FOR_CERT_MISSING), since those
+  // mean "we couldn't reach the responder" — they fall through to the
+  // generic untrusted bucket.
+  REVOKED: new Set([
+    "SEC_ERROR_REVOKED_CERTIFICATE",
+    "SEC_ERROR_REVOKED_KEY",
+    "MOZILLA_PKIX_ERROR_REVOKED_CERTIFICATE",
+  ]),
+  UNTRUSTED: new Set([
+    "SEC_ERROR_UNKNOWN_ISSUER",
+    "SEC_ERROR_UNTRUSTED_CERT",
+    "SEC_ERROR_UNTRUSTED_ISSUER",
+    "MOZILLA_PKIX_ERROR_SELF_SIGNED_CERT",
+    "MOZILLA_PKIX_ERROR_ADDITIONAL_POLICY_CONSTRAINT_FAILED",
+  ]),
+  CMS_NOT_YET_ATTEMPTED: "NS_ERROR_CMS_VERIFY_NOT_YET_ATTEMPTED",
+};
+
+function mapVerificationStatus(signatureCode, certificateCode) {
+  if (signatureCode === NSS_ERR_CODES.CMS_NOT_YET_ATTEMPTED) {
+    return { status: "unknown", errorCode: signatureCode };
+  }
+  if (signatureCode && signatureCode !== "NS_OK") {
+    return { status: "invalid", errorCode: signatureCode };
+  }
+  if (!certificateCode || certificateCode === "NS_OK") {
+    return { status: "verified", errorCode: null };
+  }
+  if (NSS_ERR_CODES.REVOKED.has(certificateCode)) {
+    return { status: "revoked", errorCode: certificateCode };
+  }
+  if (NSS_ERR_CODES.EXPIRED.has(certificateCode)) {
+    return { status: "expired", errorCode: certificateCode };
+  }
+  return NSS_ERR_CODES.UNTRUSTED.has(certificateCode)
+    ? { status: "untrusted", errorCode: certificateCode }
+    : { status: "untrusted", errorCode: certificateCode };
+}
+
+class SignatureVerifier {
+  async verify(signature) {
+    if (signature.signatureType === null) {
+      return {
+        status: "unknown",
+        errorCode: "SUBFILTER_NOT_SUPPORTED",
+        message: signature.subFilter,
+        certificate: null,
+        documentModifiedAfterSigning: !signature.coversWholeDocument,
+        modificationsAfterSignature: signature.modificationsAfterSignature,
+      };
+    }
+
+    let response;
+    try {
+      response = await FirefoxCom.requestAsync("verifyPdfSignature", {
+        pkcs7: signature.pkcs7,
+        data: signature.data,
+        signatureType: signature.signatureType,
+      });
+    } catch (ex) {
+      return {
+        status: "unknown",
+        errorCode: "BRIDGE_ERROR",
+        message: ex?.message ?? null,
+        certificate: null,
+        documentModifiedAfterSigning: !signature.coversWholeDocument,
+        modificationsAfterSignature: signature.modificationsAfterSignature,
+      };
+    }
+    if (!response || response.error) {
+      return {
+        status: "unknown",
+        errorCode: response?.error ?? "EMPTY_RESPONSE",
+        message: null,
+        certificate: null,
+        documentModifiedAfterSigning: !signature.coversWholeDocument,
+        modificationsAfterSignature: signature.modificationsAfterSignature,
+      };
+    }
+
+    // The chrome side returns an Array<nsIPDFVerificationResult>, but for
+    // a single PKCS#7 input it has exactly one entry.
+    const entry = Array.isArray(response) ? response[0] : response;
+    if (!entry) {
+      return {
+        status: "unknown",
+        errorCode: "EMPTY_RESPONSE",
+        message: null,
+        certificate: null,
+        documentModifiedAfterSigning: !signature.coversWholeDocument,
+        modificationsAfterSignature: signature.modificationsAfterSignature,
+      };
+    }
+    const { status, errorCode } = mapVerificationStatus(
+      entry.signatureResult,
+      entry.certificateResult
+    );
+    return {
+      status,
+      errorCode,
+      message: entry.message ?? null,
+      certificate: entry.certificate ?? null,
+      documentModifiedAfterSigning: !signature.coversWholeDocument,
+      modificationsAfterSignature: signature.modificationsAfterSignature,
+    };
+  }
+
+  async viewCertificate(certificate) {
+    if (!certificate) {
+      return false;
+    }
+    const certs =
+      Array.isArray(certificate.chain) && certificate.chain.length
+        ? certificate.chain.map(c => c.derBase64).filter(Boolean)
+        : [certificate.derBase64].filter(Boolean);
+    if (certs.length === 0) {
+      return false;
+    }
+    try {
+      return await FirefoxCom.requestAsync("viewPdfCertificate", { certs });
+    } catch {
+      return false;
+    }
+  }
+}
+
+class ExternalServices extends BaseExternalServices {
+  printToPDF = async data => {
+    const buffer = await FirefoxCom.requestAsync(
+      "printToPDF",
+      data,
+      getPrintToPDFTimeout(data.length)
+    );
+    return buffer ? new Uint8Array(buffer) : null;
+  };
+
+  updateFindControlState(data) {
     FirefoxCom.request("updateFindControlState", data);
   }
 
-  static updateFindMatchesCount(data) {
+  updateFindMatchesCount(data) {
     FirefoxCom.request("updateFindMatchesCount", data);
   }
 
-  static initPassiveLoading(callbacks) {
+  initPassiveLoading() {
     let pdfDataRangeTransport;
 
     window.addEventListener("message", function windowMessage(e) {
@@ -330,6 +749,10 @@ class FirefoxExternalServices extends DefaultExternalServices {
       }
       switch (args.pdfjsLoadAction) {
         case "supportsRangedLoading":
+          if (args.done && !args.data) {
+            viewerApp._documentError(null);
+            break;
+          }
           pdfDataRangeTransport = new FirefoxComDataRangeTransport(
             args.length,
             args.data,
@@ -337,106 +760,80 @@ class FirefoxExternalServices extends DefaultExternalServices {
             args.filename
           );
 
-          callbacks.onOpenWithTransport(
-            args.pdfUrl,
-            args.length,
-            pdfDataRangeTransport
-          );
+          viewerApp.open({ range: pdfDataRangeTransport });
           break;
         case "range":
           pdfDataRangeTransport.onDataRange(args.begin, args.chunk);
           break;
-        case "rangeProgress":
-          pdfDataRangeTransport.onDataProgress(args.loaded);
-          break;
         case "progressiveRead":
           pdfDataRangeTransport.onDataProgressiveRead(args.chunk);
-
-          // Don't forget to report loading progress as well, since otherwise
-          // the loadingBar won't update when `disableRange=true` is set.
-          pdfDataRangeTransport.onDataProgress(args.loaded, args.total);
           break;
         case "progressiveDone":
-          if (pdfDataRangeTransport) {
-            pdfDataRangeTransport.onDataProgressiveDone();
-          }
+          pdfDataRangeTransport?.onDataProgressiveDone();
           break;
         case "progress":
-          callbacks.onProgress(args.loaded, args.total);
+          const percent = args.total
+            ? MathClamp(Math.round((args.loaded / args.total) * 100), 0, 100)
+            : NaN;
+
+          viewerApp.progress(percent);
           break;
         case "complete":
           if (!args.data) {
-            callbacks.onError(args.errorCode);
+            viewerApp._documentError(null, { message: args.errorCode });
             break;
           }
-          callbacks.onOpenWithData(args.data, args.filename);
+          viewerApp.open({ data: args.data, filename: args.filename });
           break;
       }
     });
-    FirefoxCom.requestSync("initPassiveLoading", null);
+    FirefoxCom.request("initPassiveLoading", null);
   }
 
-  static async fallback(data) {
-    return FirefoxCom.requestAsync("fallback", data);
+  reportTelemetry(data) {
+    FirefoxCom.request("reportTelemetry", data);
   }
 
-  static reportTelemetry(data) {
-    FirefoxCom.request("reportTelemetry", JSON.stringify(data));
+  reportText(data) {
+    FirefoxCom.request("reportText", data);
   }
 
-  static createDownloadManager(options) {
-    return new DownloadManager();
+  updateEditorStates(data) {
+    FirefoxCom.request("updateEditorStates", data);
   }
 
-  static createPreferences() {
-    return new FirefoxPreferences();
+  async createL10n() {
+    try {
+      await document.l10n.ready;
+    } catch (ex) {
+      // In automation, initial translation errors reject this promise.
+      console.error(`createL10n: "${ex}".`);
+    }
+    return new L10n(AppOptions.get("localeProperties"), document.l10n);
   }
 
-  static createL10n(options) {
-    const mozL10n = document.mozL10n;
-    // TODO refactor mozL10n.setExternalLocalizerServices
-    return new MozL10n(mozL10n);
-  }
-
-  static createScripting(options) {
+  createScripting() {
     return FirefoxScripting;
   }
 
-  static get supportsIntegratedFind() {
-    const support = FirefoxCom.requestSync("supportsIntegratedFind");
-    return shadow(this, "supportsIntegratedFind", support);
+  createSignatureStorage(eventBus, signal) {
+    return new SignatureStorage(eventBus, signal);
   }
 
-  static get supportsDocumentFonts() {
-    const support = FirefoxCom.requestSync("supportsDocumentFonts");
-    return shadow(this, "supportsDocumentFonts", support);
+  createSignatureVerifier() {
+    return new SignatureVerifier();
   }
 
-  static get supportedMouseWheelZoomModifierKeys() {
-    const support = FirefoxCom.requestSync(
-      "supportedMouseWheelZoomModifierKeys"
-    );
-    return shadow(this, "supportedMouseWheelZoomModifierKeys", support);
+  dispatchGlobalEvent(event) {
+    FirefoxCom.request("dispatchGlobalEvent", event);
   }
 
-  static get isInAutomation() {
-    // Returns the value of `Cu.isInAutomation`, which is only `true` when e.g.
-    // various test-suites are running in mozilla-central.
-    const isInAutomation = FirefoxCom.requestSync("isInAutomation");
-    return shadow(this, "isInAutomation", isInAutomation);
+  openAboutPdfFeatures() {
+    if (PDFJSDev.test("GECKOVIEW")) {
+      throw new Error("Not implemented: openAboutPdfFeatures");
+    }
+    FirefoxCom.request("openAboutPdfFeatures", null);
   }
 }
-PDFViewerApplication.externalServices = FirefoxExternalServices;
 
-// l10n.js for Firefox extension expects services to be set.
-document.mozL10n.setExternalLocalizerServices({
-  getLocale() {
-    return FirefoxCom.requestSync("getLocale", null);
-  },
-
-  getStrings(key) {
-    return FirefoxCom.requestSync("getStrings", key);
-  },
-});
-
-export { DownloadManager, FirefoxCom };
+export { DownloadManager, ExternalServices, initCom, MLManager, Preferences };

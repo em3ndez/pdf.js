@@ -21,14 +21,8 @@ const FieldType = {
   time: 4,
 };
 
-function createActionsMap(actions) {
-  const actionsMap = new Map();
-  if (actions) {
-    for (const [eventType, actionsForEvent] of Object.entries(actions)) {
-      actionsMap.set(eventType, actionsForEvent);
-    }
-  }
-  return actionsMap;
+function createMap(val) {
+  return val instanceof Map ? val : new Map(val ? Object.entries(val) : null);
 }
 
 function getFieldType(actions) {
@@ -36,10 +30,8 @@ function getFieldType(actions) {
   if (!format) {
     return FieldType.none;
   }
+  format = format[0].trim();
 
-  format = format[0];
-
-  format = format.trim();
   if (format.startsWith("AFNumber_")) {
     return FieldType.number;
   }
@@ -49,10 +41,7 @@ function getFieldType(actions) {
   if (format.startsWith("AFDate_")) {
     return FieldType.date;
   }
-  if (format.startsWith("AFTime__")) {
-    return FieldType.time;
-  }
-  return FieldType.none;
+  return format.startsWith("AFTime_") ? FieldType.time : FieldType.none;
 }
 
-export { createActionsMap, FieldType, getFieldType };
+export { createMap, FieldType, getFieldType };
